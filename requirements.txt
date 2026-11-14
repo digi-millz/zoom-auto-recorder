@@ -1,0 +1,12 @@
+# Runtime dependencies for the Zoom meeting recorder.
+# Python 3.10+ (developed and verified on 3.13 / Windows).
+
+click>=8.1,<9
+rich>=13,<15
+psutil>=5.9,<8
+
+# obs-websocket-py 1.0 is the FIRST AND ONLY release that speaks the
+# obs-websocket v5 protocol shipped with OBS 28+. 0.5.x is v4-only and fails
+# with KeyError: 'status' or "Your request type is not valid".
+# It depends on websocket-client, which pip resolves automatically.
+obs-websocket-py==1.0

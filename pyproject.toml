@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zoom-auto-recorder"
+version = "0.2.0"
+description = "Schedule Zoom meetings and record them with OBS Studio until the meeting closes."
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1,<9",
+    "rich>=13,<15",
+    "psutil>=5.9,<8",
+    "obs-websocket-py==1.0",
+]
+
+[project.scripts]
+zoom-recorder = "cli:cli"
+
+[tool.setuptools]
+py-modules = ["cli", "scheduler", "window_manager", "obs_controller", "store", "webui", "ics"]
+
+# ui.html is resolved next to webui.py; run from a source checkout (or copy it
+# beside the installed module) when using `zoom-recorder gui`.

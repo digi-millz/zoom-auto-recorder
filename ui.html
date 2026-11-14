@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zoom recorder</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --fg: #16181d;
+    --muted: #6b7280;
+    --border: #dfe3e8;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --warn: #b45309;
+    --err: #b91c1c;
+    --run: #1d4ed8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --surface: #171a21;
+      --fg: #e6e8ee;
+      --muted: #9aa3b2;
+      --border: #2a2f3a;
+      --accent: #60a5fa;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --run: #93c5fd;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 16px 22px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  h1 { font-size: 17px; margin: 0 8px 0 0; font-weight: 650; }
+  h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
+  main { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px;
+         padding: 18px 22px 0; max-width: 1180px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 10px; padding: 16px; }
+  #chips { display: flex; gap: 8px; flex-wrap: wrap; margin-right: auto; }
+  .chip { border: 1px solid var(--border); border-radius: 999px;
+          padding: 3px 10px; font-size: 12px; color: var(--muted); }
+  .chip b { color: var(--fg); font-weight: 600; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--surface);
+           color: var(--fg); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; border-color: var(--border); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .actions { display: flex; gap: 8px; }
+  .cal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .cal-head h2 { margin: 0; flex: 1; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .dow { font-size: 11px; color: var(--muted); text-align: center; padding: 2px 0 6px; }
+  .day { min-height: 46px; border-radius: 7px; border: 1px solid transparent;
+         background: transparent; color: var(--fg); display: flex; flex-direction: column;
+         align-items: flex-start; gap: 2px; padding: 4px 5px; }
+  .day:hover { border-color: var(--accent); }
+  .day.muted { color: var(--muted); opacity: .55; }
+  .day.today { border-color: var(--border); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .day .num { font-size: 12px; }
+  .day .badge { font-size: 10px; border-radius: 999px; padding: 0 6px;
+                background: var(--accent); color: #fff; }
+  form { display: grid; gap: 10px; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  input[type=date], input[type=time], input[type=url], input[type=text], select {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; width: 100%;
+  }
+  .row { display: grid; grid-template-columns: 1fr 110px; gap: 10px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 12px 0 0; }
+  .entries { margin: 18px 22px 30px; max-width: 1180px; }
+  .entries-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .entries-head h2 { margin: 0; }
+  .entries-head label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border);
+           font-size: 13px; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.when { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.link { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.link a { color: var(--accent); text-decoration: none; }
+  td.file { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            color: var(--muted); font-size: 12px; }
+  .pill { border-radius: 999px; padding: 1px 9px; font-size: 11px; border: 1px solid; }
+  .pill.pending { color: var(--muted); }
+  .pill.running { color: var(--run); border-color: var(--run); }
+  .pill.done { color: var(--ok); border-color: var(--ok); }
+  .pill.failed { color: var(--err); border-color: var(--err); }
+  .pill.missed { color: var(--warn); border-color: var(--warn); }
+  .empty { color: var(--muted); padding: 10px 0; }
+  #toast { position: fixed; right: 18px; bottom: 18px; max-width: 380px; display: grid; gap: 8px; }
+  .toast { background: var(--surface); border: 1px solid var(--err); color: var(--fg);
+           border-radius: 8px; padding: 10px 12px; font-size: 13px; box-shadow: 0 6px 24px #0003; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Zoom recorder</h1>
+  <div id="chips">
+    <span class="chip" id="chip-runner">runner: <b>?</b></span>
+    <span class="chip" id="chip-obs">OBS: <b>?</b></span>
+    <span class="chip" id="chip-next">next: <b>?</b></span>
+    <span class="chip" id="chip-eta"></span>
+    <span class="chip" id="chip-rec">recording: <b>none</b></span>
+  </div>
+  <div class="actions">
+    <button id="btn-start" class="primary">Start runner</button>
+    <button id="btn-stop">Stop runner</button>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <div class="cal-head">
+      <button id="cal-prev" aria-label="previous month">‹</button>
+      <h2 id="cal-title"></h2>
+      <button id="cal-next" aria-label="next month">›</button>
+      <button id="cal-today">Today</button>
+    </div>
+    <div class="cal-grid" id="cal-grid"></div>
+  </section>
+
+  <section class="card">
+    <h2>Add calendar event</h2>
+    <form id="add-form">
+      <div class="row">
+        <label>Date <input type="date" id="f-date" required></label>
+        <label>Time <input type="time" id="f-time" value="10:00" required></label>
+      </div>
+      <label>Zoom link
+        <input type="text" id="f-url" placeholder="https://us06web.zoom.us/j/85091120436" required>
+      </label>
+      <label>Note <input type="text" id="f-note" placeholder="optional"></label>
+      <label>Repeat
+        <select id="f-repeat">
+          <option value="none">once</option>
+          <option value="weekly">weekly</option>
+          <option value="weekdays">weekdays (Mon-Fri)</option>
+        </select>
+      </label>
+      <button type="submit" class="primary">Add event</button>
+    </form>
+    <p class="hint">Adding an event schedules it; the runner must be running for a
+      recording to happen. It waits for future events and records each one until the
+      Zoom meeting window closes.</p>
+  </section>
+</main>
+
+<section class="card entries">
+  <div class="entries-head">
+    <h2>Schedule</h2>
+    <label><input type="checkbox" id="show-all"> show finished</label>
+  </div>
+  <table>
+    <thead>
+      <tr><th>When</th><th>Status</th><th>Note</th><th>Link</th><th>File</th><th></th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>Nothing scheduled.</div>
+</section>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+const TOKEN = "__API_TOKEN__";
+
+const $ = (id) => document.getElementById(id);
+let snapshot = null;
+let view = new Date();
+view.setDate(1);
+
+function toast(message) {
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.textContent = message;
+  $("toast").appendChild(node);
+  setTimeout(() => node.remove(), 6000);
+}
+
+function parseStart(text) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(text || "");
+  if (!m) return null;
+  return { y: +m[1], mo: +m[2], d: +m[3], h: +m[4], mi: +m[5] };
+}
+
+const pad = (n) => String(n).padStart(2, "0");
+const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+function fmtEta(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${pad(mins)}m`;
+  if (mins) return `${mins}m ${pad(secs)}s`;
+  return `${secs}s`;
+}
+
+function updateEta() {
+  if (!snapshot || !snapshot.next) {
+    $("chip-eta").textContent = "";
+    return;
+  }
+  const p = parseStart(snapshot.next.start);
+  if (!p) { $("chip-eta").textContent = ""; return; }
+  const target = new Date(p.y, p.mo - 1, p.d, p.h, p.mi);
+  const ms = target - Date.now();
+  $("chip-eta").textContent = ms > 0 ? `in ${fmtEta(ms)}` : "due now";
+}
+
+function renderChips() {
+  const pid = snapshot.runner_pid;
+  const running = (snapshot.entries || []).find((entry) => entry.status === "running");
+  $("chip-runner").innerHTML = `runner: <b>${pid ? "pid " + pid : "stopped"}</b>`;
+  $("chip-obs").innerHTML = `OBS: <b>${snapshot.obs_reachable ? "reachable" : "unreachable"}</b>`;
+  $("chip-next").innerHTML = snapshot.next
+    ? `next: <b>${snapshot.next.start}</b>`
+    : "next: <b>nothing pending</b>";
+  $("chip-rec").innerHTML = `recording: <b>${running ? (running.note || running.url) : "none"}</b>`;
+  $("btn-start").disabled = !!pid;
+  $("btn-stop").disabled = !pid;
+  updateEta();
+}
+
+function renderCalendar() {
+  const counts = new Map();
+  for (const entry of snapshot.entries) {
+    const day = (entry.start || "").slice(0, 10);
+    if (day) counts.set(day, (counts.get(day) || 0) + 1);
+  }
+
+  const grid = $("cal-grid");
+  grid.textContent = "";
+  $("cal-title").textContent = view.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  for (const label of ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]) {
+    const node = document.createElement("div");
+    node.className = "dow";
+    node.textContent = label;
+    grid.appendChild(node);
+  }
+
+  const first = new Date(view.getFullYear(), view.getMonth(), 1);
+  const start = new Date(first);
+  start.setDate(1 - first.getDay());
+  const today = ymd(new Date());
+
+  for (let i = 0; i < 42; i++) {
+    const day = new Date(start);
+    day.setDate(start.getDate() + i);
+    const key = ymd(day);
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "day";
+    if (day.getMonth() !== view.getMonth()) cell.classList.add("muted");
+    if (key === today) cell.classList.add("today");
+    cell.dataset.day = key;
+
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = String(day.getDate());
+    cell.appendChild(num);
+
+    if (counts.get(key)) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = `${counts.get(key)} event${counts.get(key) > 1 ? "s" : ""}`;
+      cell.appendChild(badge);
+    }
+
+    cell.addEventListener("click", () => {
+      $("f-date").value = key;
+      if (!$("f-time").value) $("f-time").value = "10:00";
+      $("f-url").focus();
+    });
+    grid.appendChild(cell);
+  }
+}
+
+function statusPill(status) {
+  const node = document.createElement("span");
+  node.className = `pill ${status}`;
+  node.textContent = status;
+  return node;
+}
+
+function renderEntries() {
+  const showAll = $("show-all").checked;
+  const rows = $("rows");
+  rows.textContent = "";
+
+  const entries = (snapshot.entries || []).filter(
+    (entry) => showAll || entry.status === "pending" || entry.status === "running"
+  );
+  $("empty").hidden = entries.length > 0;
+  if (!entries.length) {
+    $("empty").textContent = showAll ? "Nothing scheduled." : "No pending events.";
+  }
+
+  for (const entry of entries) {
+    const tr = document.createElement("tr");
+
+    const when = document.createElement("td");
+    when.className = "when";
+    when.textContent = entry.start;
+
+    const status = document.createElement("td");
+    status.appendChild(statusPill(entry.status));
+
+    const note = document.createElement("td");
+    note.textContent = entry.note || "";
+
+    const link = document.createElement("td");
+    link.className = "link";
+    const anchor = document.createElement("a");
+    anchor.href = entry.url;
+    anchor.target = "_blank";
+    anchor.rel = "noreferrer";
+    anchor.textContent = entry.url;
+    anchor.title = entry.url;
+    link.appendChild(anchor);
+
+    const file = document.createElement("td");
+    file.className = "file";
+    file.textContent = entry.last_path || "";
+    file.title = entry.last_path || "";
+
+    const actions = document.createElement("td");
+    const remove = document.createElement("button");
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => removeEntry(entry.id));
+    actions.appendChild(remove);
+
+    tr.append(when, status, note, link, file, actions);
+    rows.appendChild(tr);
+  }
+}
+
+async function api(path, options) {
+  const opts = Object.assign({}, options || {});
+  opts.headers = Object.assign({}, opts.headers || {}, { "X-Auth-Token": TOKEN });
+  const response = await fetch(path, opts);
+  let payload = {};
+  try { payload = await response.json(); } catch (err) { /* empty body */ }
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+async function refresh() {
+  try {
+    snapshot = await api("/api/status");
+    renderChips();
+    renderCalendar();
+    renderEntries();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function removeEntry(id) {
+  if (!confirm("Remove this scheduled event?")) return;
+  try {
+    await api(`/api/entries/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+$("add-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const when = `${$("f-date").value} ${$("f-time").value}`;
+  try {
+    await api("/api/entries", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        when,
+        url: $("f-url").value.trim(),
+        note: $("f-note").value.trim(),
+        repeat: $("f-repeat").value,
+      }),
+    });
+    $("f-url").value = "";
+    $("f-note").value = "";
+    await refresh();
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+$("btn-start").addEventListener("click", async () => {
+  try { await api("/api/runner/start", { method: "POST", body: "{}" }); await refresh(); }
+  catch (err) { toast(err.message); }
+});
+
+$("btn-stop").addEventListener("click", async () => {
+  try { await api("/api/runner/stop", { method: "POST", body: "{}" }); await refresh(); }
+  catch (err) { toast(err.message); }
+});
+
+$("cal-prev").addEventListener("click", () => { view.setMonth(view.getMonth() - 1); renderCalendar(); });
+$("cal-next").addEventListener("click", () => { view.setMonth(view.getMonth() + 1); renderCalendar(); });
+$("cal-today").addEventListener("click", () => { view = new Date(); view.setDate(1); renderCalendar(); });
+$("show-all").addEventListener("change", renderEntries);
+
+if (!$("f-date").value) $("f-date").value = ymd(new Date());
+refresh();
+setInterval(refresh, 5000);
+setInterval(updateEta, 1000);
+</script>
+</body>
+</html>
