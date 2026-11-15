@@ -145,6 +145,9 @@ Runner semantics:
   about any OBS recording no entry owns (`--stop-orphan-recording` stops it).
 - The recorded file is verified (non-empty, found on disk even if OBS did not
   report a path). Missing file → exit 7. Less than `--min-free-gb` free → exit 8.
+- The desktop session must be unlocked. A locked session is refused up front (exit 9) instead of producing a black
+  rectangle with audio, and the display is held awake for the length of the session so a screen-blank timeout
+  cannot black out a meeting.
 - `--output-dir` on `add` overrides the runner's default folder per meeting.
 
 ## Local calendar UI
@@ -187,15 +190,24 @@ python main.py status --json
 python main.py uninstall
 ```
 
-## Import a calendar file
+## Import a calendar (file or feed)
 
 ```powershell
-python main.py import-ics calendar.ics --dry-run
+python main.py import-ics calendar.ics --dry-run          # preview
 python main.py import-ics calendar.ics
+python main.py import-ics "https://calendar.google.com/calendar/ical/…/basic.ics"
 ```
 
-Only events containing a Zoom link are imported; duplicates (same URL and start)
-are skipped, and `FREQ=WEEKLY` becomes `repeat: weekly`.
+Only events containing a Zoom link are imported. The RRULE is kept (`FREQ`, `INTERVAL`, `BYDAY`, `UNTIL`, `COUNT`)
+and so is `TZID`, so "every 2 weeks on Wednesday at 10:00 New York" is scheduled as exactly that; a rule this
+recorder cannot express (`BYMONTHDAY`, `WKST`, …) imports as a single occurrence and is logged. Duplicates are
+detected by **meeting identity + start**, not by URL string, so the same meeting pasted as a link and as
+"Meeting ID: …" is one entry.
+
+**Google Calendar without OAuth:** Settings → *Integrate calendar* → copy the **secret address in iCal format**,
+paste it into the Settings card's **Calendar feed** field (or pass `--calendar-url`) and the runner re-imports it
+every 15 minutes. Deletions in Google are not propagated — a cancelled meeting stays scheduled and the join simply
+fails — and Google refreshes the feed with some delay.
 
 ## What happens, in order
 
@@ -266,6 +278,7 @@ and restores the previous value on exit.
 | 6 | WebSocket lost during recording (check OBS; the file may still exist) |
 | 7 | no recording file was found or it is empty (check OBS/log) |
 | 8 | not enough free disk space (`--min-free-gb`) |
+| 9 | the Windows session is locked — the capture would be black; the entry stays pending |
 
 ## Tests
 

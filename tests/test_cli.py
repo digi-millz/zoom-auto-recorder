@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -149,6 +150,28 @@ class StopCommandTests(unittest.TestCase):
                 Path(str(schedule) + ".stop").exists(),
                 "the runner polls a marker file, it is never killed",
             )
+
+
+class SessionGuardTests(unittest.TestCase):
+    def test_a_locked_session_is_refused_before_launching(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(cli, "desktop_locked", return_value=True), patch.object(
+                cli, "launch_meeting"
+            ) as launch:
+                result = cli._record_session(
+                    url="https://zoom.us/j/123456789",
+                    output_path=Path(tmp),
+                    config=cli.ObsConfig(),
+                    obs_exe=None,
+                    launch_mode="browser",
+                    join_timeout=1.0,
+                    join_delay=0.0,
+                    max_duration=0.0,
+                    close_grace=0.0,
+                    keep_recording_on_interrupt=True,
+                )
+        self.assertEqual(result.exit_code, cli.EXIT_SESSION)
+        launch.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

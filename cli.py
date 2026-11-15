@@ -68,12 +68,15 @@ from window_manager import (
     WindowNotFound,
     close_window,
     current_meeting_window,
-    iter_windows,
+    desktop_locked,
+    display_awake,
     find_meeting_window,
     find_process,
     is_windows,
+    iter_windows,
     launch_meeting,
     maximize,
+    restore_window,
     to_zoommtg,
 )
 
@@ -91,6 +94,7 @@ EXIT_RECORD = 5
 EXIT_LOST = 6
 EXIT_NO_FILE = 7
 EXIT_DISK = 8
+EXIT_SESSION = 9
 
 DEFAULT_SCHEDULE = "./schedule.json"
 DEFAULT_OUTPUT = "./recordings"
@@ -579,6 +583,15 @@ def _record_session(
         log.error("this tool drives the Windows Zoom client; Windows is required")
         return SessionResult(1)
 
+    # A locked session makes every window capture black, so this is caught before anything is launched rather
+    # than ten seconds into the file. Unknown failures report "not locked": a diagnostic must not block a meeting.
+    if desktop_locked():
+        log.error(
+            "the Windows session is locked: window capture would record a black rectangle with audio; "
+            "unlock and run again (the entry stays pending)"
+        )
+        return SessionResult(EXIT_SESSION)
+
     # A pasted invite carries the passcode in prose; canonicalise once so the URI has ?pwd= and no dialog is
     # needed. An unparseable URL is left exactly as given (the browser fallback may still handle it).
     room = invite.parse(url)
@@ -770,6 +783,28 @@ def _record_session(
                 ),
             )
 
+        def repair_capture() -> None:
+            """A black frame usually means a minimised or recreated window: un-minimise it, then re-point.
+
+            Re-pointing at a minimised window would capture black again, so the restore comes first and the
+            window is looked up again afterwards (restoring can recreate the capture handle).
+            """
+            target = current_meeting_window(
+                extra_classes=window_classes, title_pattern=title_pattern
+            ) or window
+            if target is None:
+                return
+            if restore_window(target.hwnd):
+                log.info("the meeting window was minimised; restored it")
+                time.sleep(0.4)
+                target = (
+                    current_meeting_window(
+                        extra_classes=window_classes, title_pattern=title_pattern
+                    )
+                    or target
+                )
+            scene.prepare(controller.call, target)
+
         def monitor_once() -> int:
             return _monitor(
                 controller,
@@ -785,14 +820,8 @@ def _record_session(
                 capture_luma=capture_luma,
                 on_black=report_black,
                 # Re-point at the *current* window, not the one captured at start: a black frame usually means
-                # the window was recreated, and re-preparing a stale handle would not help.
-                repoint_capture=lambda: scene.prepare(
-                    controller.call,
-                    current_meeting_window(
-                        extra_classes=window_classes, title_pattern=title_pattern
-                    )
-                    or window,
-                ),
+                # the window was recreated or minimised, and re-preparing a stale handle would not help.
+                repoint_capture=repair_capture,
             )
 
         exit_code = monitor_once()
@@ -935,6 +964,14 @@ def _record_session(
         controller.close()
 
     return SessionResult(exit_code, saved_path, interrupted)
+
+
+def _record_session_awake(**kwargs) -> SessionResult:
+    """`_record_session` with the display held awake; Windows clears the flag when this process ends."""
+    with display_awake() as granted:
+        if not granted:
+            log.warning("could not keep the display awake; a screen blank would record black")
+        return _record_session(**kwargs)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -1176,7 +1213,7 @@ def record(
             _fail(1, message)
         log.warning("%s; starting immediately", message)
 
-    result = _record_session(
+    result = _record_session_awake(
         url=url,
         output_path=output_path,
         config=config,
@@ -1604,7 +1641,7 @@ def run(
 
             log.info("recording entry %s (%s) into %s", entry.id, entry.start, output)
             schedule.mark(entry.id, STATUS_RUNNING)
-            result = _record_session(
+            result = _record_session_awake(
                 url=entry.url,
                 output_path=output,
                 config=ObsConfig(

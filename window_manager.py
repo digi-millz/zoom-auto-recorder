@@ -15,9 +15,10 @@ import logging
 import os
 import sys
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 log = logging.getLogger(__name__)
@@ -335,6 +336,22 @@ def find_meeting_window(
         time.sleep(poll)
 
 
+def is_minimized(hwnd: int) -> bool:
+    """True when *hwnd* is minimised (a minimised window captures black)."""
+    _require_windows()
+    _user32.IsIconic.argtypes = [wintypes.HWND]
+    _user32.IsIconic.restype = wintypes.BOOL
+    return bool(_user32.IsIconic(hwnd))
+
+
+def restore_window(hwnd: int) -> bool:
+    """Un-minimise *hwnd* without touching a maximised window. Returns whether it was minimised."""
+    if not is_minimized(hwnd):
+        return False
+    _user32.ShowWindow(hwnd, SW_RESTORE)
+    return True
+
+
 def maximize(hwnd: int) -> None:
     """Restore, maximise and raise *hwnd* to the foreground (best effort)."""
     _require_windows()
@@ -409,6 +426,56 @@ def is_alive(hwnd: int) -> bool:
     """True while the window handle still refers to a live window."""
     _require_windows()
     return bool(_user32.IsWindow(hwnd))
+
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
+DESKTOP_READOBJECTS = 0x0001
+DESKTOP_SWITCHDESKTOP = 0x0100
+
+
+def desktop_locked() -> bool:
+    """True when the interactive session is locked.
+
+    ``OpenInputDesktop`` fails with access-denied while the workstation is locked, which is exactly the state that
+    makes every window capture black — the recording would be a black rectangle with audio. Unknown failures are
+    reported as *not* locked: a diagnostic must never block a recording by itself.
+    """
+    _require_windows()
+    _user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _user32.OpenInputDesktop.restype = ctypes.c_void_p
+    _user32.CloseDesktop.argtypes = [ctypes.c_void_p]
+    handle = _user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS | DESKTOP_SWITCHDESKTOP)
+    if handle:
+        _user32.CloseDesktop(handle)
+        return False
+    error = ctypes.get_last_error()
+    return error in (5, 0x522)  # ERROR_ACCESS_DENIED, ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION
+
+
+def keep_display_awake(enabled: bool) -> bool:
+    """Ask Windows not to blank the display or sleep while a recording is running.
+
+    Returns whether the call succeeded; a failure is logged by the caller, not raised — a stubborn power plan is a
+    warning, not a reason to skip a meeting.
+    """
+    _require_windows()
+    set_state = ctypes.windll.kernel32.SetThreadExecutionState  # kernel32, not user32
+    set_state.argtypes = [wintypes.DWORD]
+    set_state.restype = wintypes.DWORD
+    flags = ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED if enabled else ES_CONTINUOUS
+    return bool(set_state(flags))
+
+
+@contextmanager
+def display_awake() -> Iterator[bool]:
+    """Keep the display on for the duration of the block; yields whether that was granted."""
+    ok = keep_display_awake(True)
+    try:
+        yield ok
+    finally:
+        keep_display_awake(False)
 
 
 def launch_meeting(

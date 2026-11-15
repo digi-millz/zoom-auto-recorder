@@ -1,8 +1,10 @@
 import re
 import unittest
-
 from window_manager import (
     WindowInfo,
+    desktop_locked,
+    display_awake,
+    keep_display_awake,
     select_meeting_window,
     to_zoommtg,
 )
@@ -90,6 +92,17 @@ class WindowOverrideTests(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.hwnd, 10)
+
+
+class SessionStateTests(unittest.TestCase):
+    def test_lock_detection_answers_boolean(self):
+        # The real answer depends on the machine; the contract is that it never raises.
+        self.assertIsInstance(desktop_locked(), bool)
+
+    def test_display_requests_are_granted_and_released(self):
+        with display_awake() as granted:
+            self.assertTrue(granted)
+        self.assertTrue(keep_display_awake(False))
 
 if __name__ == "__main__":
     unittest.main()
