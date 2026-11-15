@@ -74,6 +74,7 @@ the road.
 | `scene.py` | OBS scene bootstrap: window capture, app audio, global-audio mute |
 | `postprocess.py` | remux, rename, `ffprobe` verification |
 | `report.py` | per-run HTML report: record + screenshots → one self-contained file (pure) |
+| `teach.py` | teach mode: unmatched-dialog screenshots → validated `rules.json` rule (pure) |
 | `rules.json` | dialog labels and limits (data, not code) |
 | `tests/` | unittest; live-meeting evidence in `docs/spikes.md` |
 

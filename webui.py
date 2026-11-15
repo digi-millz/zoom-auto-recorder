@@ -22,11 +22,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import recurrence
+import teach
 import zoom_account
 from defaults import DEFAULT_TZ
 from obs_controller import is_websocket_reachable
 from scheduler import ScheduleError, parse_start
 from store import RunnerLock, ScheduleStore, StoreError, request_stop
+
+RULES_FILE = Path(__file__).with_name("rules.json")
 
 log = logging.getLogger(__name__)
 
@@ -298,6 +301,32 @@ class UiHandler(BaseHTTPRequestHandler):
                 200,
                 {"path": str(self.state.log_file), "text": log_tail(self.state.log_file, wanted)},
             )
+        elif path == "/api/shots":
+            if not self._guard():
+                return
+            shots_root = self._shots_root()
+            shots = teach.collect_shots(shots_root)
+            self._send_json(
+                200,
+                {
+                    "root": str(shots_root),
+                    "shots": [
+                        {"session": shot.session, "cls": shot.cls, "url": shot.url}
+                        for shot in shots
+                    ],
+                },
+            )
+        elif path.startswith("/api/shots/"):
+            # <img src> cannot send the X-Auth-Token header, so this one route also accepts ?t=; the page already
+            # carries the token and the server is localhost-only.
+            if not self._host_ok() or not self._origin_ok():
+                self._send_json(403, {"error": "forbidden"})
+                return
+            supplied = (parse_qs(parsed.query).get("t") or [""])[0]
+            if not secrets.compare_digest(supplied, self.state.token):
+                self._send_json(401, {"error": "missing or invalid token"})
+                return
+            self._send_shot(path[len("/api/shots/") :])
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -333,6 +362,19 @@ class UiHandler(BaseHTTPRequestHandler):
                 self._send_json(409, {"error": str(exc)})
         elif path == "/api/runner/stop":
             self._send_json(200, {"stopped": stop_runner(self.state)})
+        elif path == "/api/rules":
+            try:
+                rule = teach.add_rule(
+                    RULES_FILE,
+                    cls=str(payload.get("cls") or ""),
+                    label=str(payload.get("label") or ""),
+                    scope=str(payload.get("scope") or "dialog"),
+                )
+            except (OSError, ValueError) as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            log.info("taught rule %s", rule["name"])
+            self._send_json(201, {"rule": rule})
         else:
             self._send_json(404, {"error": "not found"})
         return
@@ -358,6 +400,36 @@ class UiHandler(BaseHTTPRequestHandler):
 
     # -- helpers ----------------------------------------------------------- #
 
+    def _shots_root(self) -> Path:
+        """Where the watcher put its screenshots: the configured recordings folder's `_shots`."""
+        try:
+            store = ScheduleStore(self.state.schedule_path)
+            return output_dir_for(self.state, store) / "_shots"
+        except StoreError:
+            return self.state.output_dir / "_shots"
+
+    def _send_shot(self, relative: str) -> None:
+        """Serve one screenshot. Names must match the generator, so no path can escape the folder."""
+        parts = relative.split("/")
+        if len(parts) != 2:
+            self._send_json(404, {"error": "not found"})
+            return
+        session, name = parts
+        if not teach.SESSION_PATTERN.match(session) or teach.class_name(name) is None:
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            body = (self._shots_root() / session / name).read_bytes()
+        except OSError:
+            self._send_json(404, {"error": "not found"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _add_entry(self, payload: dict) -> None:
         url = str(payload.get("url") or "").strip()
         when = str(payload.get("when") or "").strip()
@@ -369,7 +441,7 @@ class UiHandler(BaseHTTPRequestHandler):
             repeat = None
         rrule = str(payload.get("rrule") or "").strip() or None
         tz = str(payload.get("tz") or "").strip() or None
-
+        mic = bool(payload.get("mic"))
         if not url:
             self._send_json(400, {"error": "url is required"})
             return
@@ -387,6 +459,7 @@ class UiHandler(BaseHTTPRequestHandler):
                 repeat=repeat,
                 rrule=rrule,
                 tz=tz,
+                mic=mic,
             )
         except (ScheduleError, StoreError, ValueError) as exc:
             self._send_json(400, {"error": str(exc)})
@@ -396,7 +469,7 @@ class UiHandler(BaseHTTPRequestHandler):
     def _update_entry(self, entry_id: str, payload: dict) -> None:
         """Edit an existing entry. Only the supplied fields change; ``""`` clears an optional one."""
         fields: dict[str, object] = {}
-        for key in ("url", "note", "email", "output_dir", "tz", "rrule", "repeat"):
+        for key in ("url", "note", "email", "output_dir", "tz", "rrule", "repeat", "mic"):
             if key in payload:
                 fields[key] = payload[key]
         when = str(payload.get("when") or "").strip()

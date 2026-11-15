@@ -26,6 +26,8 @@ WINDOW_SOURCE = "Zoom meeting"
 AUDIO_SOURCE = "Zoom audio"
 WINDOW_KIND = "window_capture"
 AUDIO_KIND = "wasapi_process_output_capture"
+MIC_SOURCE = "Microphone"
+MIC_KIND = "wasapi_input_capture"
 
 CAPTURE_METHOD_DXGI = 2
 
@@ -86,6 +88,7 @@ def prepare(
     scene: str = SCENE_NAME,
     window_source: str = WINDOW_SOURCE,
     audio_source: str = AUDIO_SOURCE,
+    mic: bool = False,
 ) -> dict[str, str]:
     """Create or re-point the scene, window capture and app-audio capture.
 
@@ -134,18 +137,21 @@ def prepare(
         log.info("adding %r to scene %r", name, scene)
         _data(call(requests.CreateSceneItem(sceneName=scene, sourceName=name, sceneItemEnabled=True)))
 
+    mic_on = ensure_microphone(call, scene=scene, enabled=mic)
     muted = mute_global_audio(call)
     log.info(
-        "OBS scene ready: %s (window=%s, method=%d, muted=%s)",
+        "OBS scene ready: %s (window=%s, method=%d, muted=%s, mic=%s)",
         scene,
         composite(window),
         CAPTURE_METHOD_DXGI,
         ",".join(muted) or "none",
+        "on" if mic_on else "off",
     )
     return {
         "scene": scene,
         "window_source": window_source,
         "audio_source": audio_source,
+        "mic": "on" if mic_on else "off",
         "muted": muted,
     }
 
@@ -169,6 +175,66 @@ def mute_global_audio(call: Call, names: tuple[str, ...] = GLOBAL_AUDIO_SOURCES)
     if muted:
         log.info("muted OBS global audio %s (Zoom is captured by %s)", muted, AUDIO_SOURCE)
     return muted
+
+
+def ensure_microphone(
+    call: Call,
+    *,
+    scene: str = SCENE_NAME,
+    source: str = MIC_SOURCE,
+    enabled: bool,
+) -> bool:
+    """Create the per-entry microphone input and enable/disable it in the scene.
+
+    Recording is remote-audio-only by default, so this source is created only when an entry asks for it; the
+    global ``Mic/Aux`` device stays muted, which keeps the mix from carrying the same voice twice. Disabling (not
+    deleting) a leftover source is deliberate: switching an entry back to remote-only must silence the mic without
+    destroying an OBS input the user may have configured.
+    """
+    from obswebsocket import requests
+
+    inputs = _data(call(requests.GetInputList())).get("inputs", [])
+    existing = {str(item.get("inputName")): str(item.get("inputKind")) for item in inputs}
+    if source in existing and existing[source] != MIC_KIND:
+        raise SceneError(f"input {source!r} exists as {existing[source]!r}, expected {MIC_KIND!r}")
+    if source not in existing:
+        if not enabled:
+            return False
+        log.info("creating OBS microphone input %r", source)
+        _data(
+            call(
+                requests.CreateInput(
+                    sceneName=scene,
+                    inputName=source,
+                    inputKind=MIC_KIND,
+                    inputSettings={},
+                    sceneItemEnabled=enabled,
+                )
+            )
+        )
+
+    items = _data(call(requests.GetSceneItemList(sceneName=scene))).get("sceneItems", [])
+    item = next((entry for entry in items if str(entry.get("sourceName")) == source), None)
+    if item is None:
+        _data(
+            call(
+                requests.CreateSceneItem(
+                    sceneName=scene, sourceName=source, sceneItemEnabled=enabled
+                )
+            )
+        )
+    else:
+        _data(
+            call(
+                requests.SetSceneItemEnabled(
+                    sceneName=scene,
+                    sceneItemId=item.get("sceneItemId"),
+                    sceneItemEnabled=enabled,
+                )
+            )
+        )
+    log.info("microphone %s", "on" if enabled else "off")
+    return enabled
 
 
 def source_luma(call: Call, source: str = WINDOW_SOURCE, width: int = 320) -> int | None:

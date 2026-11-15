@@ -98,6 +98,7 @@ python main.py list --all --json     # full history, machine-readable
 python main.py remove 4bfaf89e       # by id
 python main.py edit 4bfaf89e --start "2026-11-20 10:00" --note "Weekly sync"
 python main.py edit 4bfaf89e --rrule "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE" --tz Europe/London
+python main.py add --url … --start … --mic   # also capture this machine's microphone
 python main.py run                   # resident: wait, record, repeat
 python main.py run --once            # record at most one due event, then exit
 python main.py run --drain           # process what is due, exit instead of waiting
@@ -170,18 +171,24 @@ Add form:
 - **Repeats** — once / daily / weekly / every 2 weeks / monthly, with weekday checkboxes and an end
   (never / on a date / after N times). This builds a real RRULE, and the line under the form previews the
   next five occurrences, computed by the same code the runner uses.
-- **Timezone** — a dropdown, **defaulting to Eastern (America/New_York)**. The zone is stored on the event, so
-  a 10:00 Eastern meeting stays 10:00 Eastern no matter what zone this machine reports. Preview times are shown
-  in the machine's zone, which is when the recording will actually start.
+- **Timezone** — a free-text field with common zones suggested (any IANA name works), **defaulting to Eastern
+  (America/New_York)**; empty means this machine's zone. The zone is stored on the event, so a 10:00 Eastern
+  meeting stays 10:00 Eastern no matter what zone this machine reports. Preview times are shown in the machine's
+  zone, which is when the recording will actually start.
 - **Save this one to** — per-event recordings folder, overriding the global one.
 - **Zoom email** — per-event prejoin address, overriding the Settings default.
 - **Settings** card — recordings folder (`settings.output_dir`), Zoom email (`settings.email`), and an optional
   **notify webhook** (`settings.notify_url`). The runner re-reads the folder per event and the webhook per run, so
   changes take effect without a restart.
 
-- **Add calendar event** — the timezone field suggests common zones but accepts any IANA name
-  (`Europe/London`, `Australia/Perth`, …); an empty field means the machine's own zone. A rule the
-  recorder cannot express is refused at save time, not at 03:00.
+- **Teach a dialog** card — the watcher's screenshots of dialogs it did not recognise (one per window class).
+  Type the button you can see, pick a scope, and **Teach** appends a rule to `rules.json`: denylisted labels are
+  refused, an already-handled label is not duplicated, and nothing is clicked until it has a rule.
+
+- **Also record my microphone** — per entry, off by default. Remote audio is always captured; with this ticked
+  the scene gets a `wasapi_input_capture` source, enabled for that entry and disabled again for the next one
+  (`--mic` / `--no-mic` on `add` and `edit`). The global `Mic/Aux` device stays muted, so a voice is never in
+  the mix twice.
 
 Security and tokens: it binds to `127.0.0.1` only, embeds a per-launch token and rejects requests without it, a
 non-local `Origin`/`Host`, or a non-JSON POST — a desktop control panel, not a network service. Only one instance
@@ -204,6 +211,10 @@ logon trigger, `ExecutionTimeLimit=PT0S` (unlimited), `MultipleInstancesPolicy=I
 (a double start is ignored; the runner's own lock also guards), and
 `RestartOnFailure` every minute, up to 3 times when the runner exits non-zero.
 An exit 0 (stop marker, or `--drain` done) is not a failure and is not restarted.
+
+`install --drain` registers `run --drain` instead: at logon it records anything
+already due and exits, for a machine that should not keep a recorder alive all
+day. It combines with `--restart-on-failure`.
 
 ## Run history
 

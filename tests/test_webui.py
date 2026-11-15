@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from datetime import date
+from unittest.mock import patch
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -90,6 +91,21 @@ class WebUiTests(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         self.assertIsNone(json.loads(body)["entry"]["repeat"])
+
+    def test_the_microphone_flag_round_trips_through_the_api(self) -> None:
+        status, body = self.request(
+            "/api/entries",
+            method="POST",
+            payload={"when": "2026-11-09 10:00", "url": "https://zoom.us/j/1", "mic": True},
+        )
+        entry = json.loads(body)["entry"]
+        self.assertEqual(status, 201)
+        self.assertTrue(entry["mic"])
+        status, body = self.request(
+            f"/api/entries/{entry['id']}", method="POST", payload={"mic": False}
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["entry"]["mic"])
 
     def test_invalid_date_is_rejected(self):
         code, body = self.request_error(
@@ -301,6 +317,55 @@ class WebUiTests(unittest.TestCase):
             f"/api/entries/{entry_id}", method="POST", payload={"email": "nope"}
         )
         self.assertEqual(code, 400)
+
+    def write_shot(self, session: str = "20261114-194039", cls: str = "zRichMsgBoxClass") -> bytes:
+        directory = self.dir / "rec" / "_shots" / session
+        directory.mkdir(parents=True, exist_ok=True)
+        image = directory / f"194041_00360d4e_before_{cls}.png"
+        payload = b"\x89PNG\r\n\x1a\nfake"
+        image.write_bytes(payload)
+        return payload
+
+    def test_shots_are_listed_and_served_with_the_query_token(self) -> None:
+        payload = self.write_shot()
+        status, body = self.request("/api/shots")
+        listed = json.loads(body)["shots"]
+        self.assertEqual(status, 200)
+        self.assertEqual(listed[0]["cls"], "zRichMsgBoxClass")
+
+        with urlopen(self.base + listed[0]["url"] + "?t=" + self.server.state.token, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), payload)
+        code, _body = self.request_error(listed[0]["url"])
+        self.assertEqual(code, 401)
+
+    def test_a_taught_rule_is_appended_and_a_denylisted_label_is_refused(self) -> None:
+        rules = self.dir / "rules.json"
+        rules.write_text(
+            json.dumps({"version": 1, "deny": ["Cancel"], "rules": []}), encoding="utf-8"
+        )
+        with patch.object(webui, "RULES_FILE", rules):
+            status, body = self.request(
+                "/api/rules",
+                method="POST",
+                payload={"cls": "zRichMsgBoxClass", "label": "Acknowledge", "scope": "dialog"},
+            )
+            refused, _body = self.request_error(
+                "/api/rules",
+                method="POST",
+                payload={"cls": "zRichMsgBoxClass", "label": "Cancel", "scope": "dialog"},
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["rule"]["match"]["text"], ["Acknowledge"])
+        self.assertEqual(refused, 400)
+        self.assertEqual(len(json.loads(rules.read_text(encoding="utf-8"))["rules"]), 1)
+
+    def test_a_shot_path_cannot_escape_the_folder(self) -> None:
+        self.write_shot()
+        code, _body = self.request_error(
+            "/api/shots/20261114-194039/../../schedule.json?t=" + self.server.state.token
+        )
+        self.assertEqual(code, 404)
 
 
 if __name__ == "__main__":

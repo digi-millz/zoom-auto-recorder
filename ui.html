@@ -84,12 +84,22 @@
          border-radius: 4px; padding: 0 4px; }
   .days { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .days label { display: flex; align-items: center; gap: 4px; }
+  .checkline { display: flex; align-items: center; gap: 6px; }
   pre { margin: 0; max-height: 280px; overflow: auto; background: var(--bg);
         border: 1px solid var(--border); border-radius: 8px; padding: 10px;
         font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
   .hint { color: var(--muted); font-size: 12px; margin: 12px 0 0; }
   .entries { margin: 18px 22px 30px; max-width: 1180px; }
   .entries-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .teach-row { display: flex; align-items: center; gap: 12px; padding: 10px 0;
+               border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .teach-row img { width: 180px; height: auto; border: 1px solid var(--border); border-radius: 4px; }
+  .teach-meta { display: flex; flex-direction: column; gap: 2px; min-width: 150px; }
+  .teach-meta code { font-size: 12px; }
+  .teach-label { flex: 1 1 180px; min-width: 160px; }
+  .teach-row select, .teach-row input { width: auto; }
+  .teach-row select { flex: 0 0 auto; }
+  .teach-row button { flex: 0 0 auto; }
   .entries-head h2 { margin: 0; }
   .entries-head label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
   table { width: 100%; border-collapse: collapse; }
@@ -221,6 +231,8 @@
         <input type="text" id="f-email" placeholder="default: set below" spellcheck="false">
       </label>
       <p class="hint">Only used if Zoom asks "Enter your email and name" before the meeting.</p>
+      <label class="checkline"><input type="checkbox" id="f-mic"> Also record my microphone
+        (remote audio is recorded either way)</label>
       <div class="actions">
         <button type="submit" class="primary" id="btn-save">Add event</button>
         <button type="button" id="btn-cancel" hidden>Cancel edit</button>
@@ -257,6 +269,14 @@
       an iCal feed the runner re-imports every 15 minutes — a Google Calendar "secret address in iCal format"
       needs no OAuth. Currently: <b id="out-current">…</b> · email <b id="email-current">…</b> ·
       webhook <b id="notify-current">…</b> · calendar <b id="calendar-current">…</b></p>
+  </section>
+
+  <section class="card wide" id="teach-card">
+    <h2>Teach a dialog</h2>
+    <p class="hint">Screenshots the watcher took when a Zoom dialog was not recognised. Type the button you
+      recognise, pick where it belongs, and the rule is appended to <code>rules.json</code> — the recorder never
+      clicks a label it was not told about.</p>
+    <div id="teach-list"><p class="hint">No unmatched dialogs on record.</p></div>
   </section>
 
   <section class="card wide" id="log-card">
@@ -551,6 +571,7 @@ async function refresh() {
     renderPaths();
     applyDefaultTz();
     renderLog();
+    renderTeach();
   } catch (err) {
     toast(err.message);
   }
@@ -565,6 +586,7 @@ function exitEdit() {
   $("f-url").value = "";
   $("f-note").value = "";
   $("f-email").value = "";
+  $("f-mic").checked = false;
   $("f-folder").value = "";
   $("f-rrule").value = "";
   $("f-freq").value = "once";
@@ -584,6 +606,7 @@ function startEdit(entry) {
   $("f-email").value = entry.email || "";
   $("f-folder").value = entry.output_dir || "";
   $("f-tz").value = entry.tz || "";
+  $("f-mic").checked = !!entry.mic;
   const parsed = parseRule(entry.rrule || "");
   document.querySelectorAll(".wd").forEach((box) => {
     box.checked = !!(parsed && parsed.days && parsed.days.includes(box.value));
@@ -713,6 +736,80 @@ async function renderLog() {
   } catch (err) { /* the log is not worth a toast per poll */ }
 }
 
+let teachBusy = false;
+async function renderTeach() {
+  if (teachBusy) return;
+  teachBusy = true;
+  try {
+    const data = await api("/api/shots");
+    const list = $("teach-list");
+    list.textContent = "";
+    if (!data.shots.length) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = "No unmatched dialogs on record.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const shot of data.shots) list.appendChild(teachRow(shot));
+  } catch (err) {
+    // Optional card: a failure here must not break the page.
+  } finally {
+    teachBusy = false;
+  }
+}
+
+function teachRow(shot) {
+  const row = document.createElement("div");
+  row.className = "teach-row";
+  const image = document.createElement("img");
+  image.src = `${shot.url}?t=${encodeURIComponent(TOKEN)}`;
+  image.alt = shot.cls;
+  const meta = document.createElement("div");
+  meta.className = "teach-meta";
+  const cls = document.createElement("code");
+  cls.textContent = shot.cls;
+  const when = document.createElement("span");
+  when.className = "hint";
+  when.textContent = shot.session;
+  meta.append(cls, when);
+  const label = document.createElement("input");
+  label.className = "teach-label";
+  label.placeholder = "button label";
+  label.spellcheck = false;
+  const scope = document.createElement("select");
+  scope.className = "teach-scope";
+  for (const value of ["dialog", "prejoin", "meeting", "any"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    scope.appendChild(option);
+  }
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary";
+  save.textContent = "Teach";
+  save.addEventListener("click", async () => {
+    if (!label.value.trim()) {
+      toast("type the button label first");
+      return;
+    }
+    try {
+      const result = await api("/api/rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cls: shot.cls, label: label.value.trim(), scope: scope.value }),
+      });
+      toast(`learned ${result.rule.match.text[0]} (${result.rule.scope})`);
+      row.remove();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  row.append(image, meta, label, scope, save);
+  return row;
+}
+
 for (const id of ["f-freq", "f-end", "f-until", "f-count", "f-tz", "f-date", "f-time"]) {
   $(id).addEventListener("input", updateRepeatUI);
   $(id).addEventListener("change", updateRepeatUI);
@@ -733,6 +830,7 @@ $("add-form").addEventListener("submit", async (event) => {
     tz: $("f-tz").value.trim() || null,
     output_dir: $("f-folder").value.trim() || null,
     email: $("f-email").value.trim() || null,
+    mic: $("f-mic").checked,
   });
   try {
     if (editingId) {
@@ -754,6 +852,7 @@ $("add-form").addEventListener("submit", async (event) => {
     $("f-url").value = "";
     $("f-note").value = "";
     $("f-email").value = "";
+    $("f-mic").checked = false;
     $("f-folder").value = "";
     await refresh();
   } catch (err) {

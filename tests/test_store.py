@@ -120,6 +120,15 @@ class StorePersistenceTests(unittest.TestCase):
                 output_dir=str(self.path.parent / "missing" / "rec"),
             )
 
+    def test_the_microphone_flag_persists_and_edits(self):
+        store = ScheduleStore(self.path)
+        added = store.add(url="https://zoom.us/j/1", start_at="2026-11-09 18:30", mic=True)
+        self.assertTrue(self.fetch(added.id).mic)
+        store.update(added.id, mic="false")
+        self.assertFalse(self.fetch(added.id).mic)
+        store.update(added.id, mic=True)
+        self.assertTrue(self.fetch(added.id).mic)
+
     def test_remove(self):
         store = ScheduleStore(self.path)
         added = store.add(url="https://zoom.us/j/1", start_at="2026-11-09 18:30")

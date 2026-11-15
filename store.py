@@ -70,6 +70,7 @@ class Entry:
     rrule: str | None = None  # RFC 5545 recurrence, e.g. "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE"
     tz: str | None = None  # IANA zone name; empty means this machine's zone
     anchor: str | None = None  # first start, so COUNT/UNTIL keep counting from the beginning
+    mic: bool = False  # also capture this machine's microphone; remote audio is always captured
     status: str = STATUS_PENDING
     created: str = ""
     last_exit_code: int | None = None
@@ -104,6 +105,13 @@ def validated_output_dir(value: str | Path | None) -> str | None:
     if not path.parent.is_dir():
         raise ScheduleError(f"output_dir's parent folder does not exist: {path.parent}")
     return str(path)
+
+
+def _as_bool(value: object) -> bool:
+    """JSON booleans, CLI flags and form checkboxes all mean the same thing; "false" is false."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 class ScheduleStore:
@@ -204,6 +212,7 @@ class ScheduleStore:
         repeat: str | None = None,
         rrule: str | None = None,
         tz: str | None = None,
+        mic: bool = False,
     ) -> Entry:
         repeat = (repeat or "").strip().lower() or None
         if repeat in ("none", "once"):
@@ -235,6 +244,7 @@ class ScheduleStore:
             rrule=spec or None,
             tz=(tz or "").strip() or None,
             anchor=start.strftime(START_FORMAT) if spec else None,
+            mic=bool(mic),
             created=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self.entries.append(entry)
@@ -247,7 +257,7 @@ class ScheduleStore:
         Only the keys passed are touched; ``None`` means "leave alone" (so a CLI flag that was not given cannot
         blank a value). Validation runs before anything is written, so a bad edit leaves the file untouched.
         """
-        allowed = {"url", "start_at", "output_dir", "note", "email", "repeat", "rrule", "tz"}
+        allowed = {"url", "start_at", "output_dir", "note", "email", "repeat", "rrule", "tz", "mic"}
         unknown = set(changes) - allowed
         if unknown:
             raise ScheduleError(f"cannot edit {sorted(unknown)}")
@@ -298,6 +308,8 @@ class ScheduleStore:
             entry.note = str(changes["note"]).strip()
         if changes.get("output_dir") is not None:
             entry.output_dir = validated_output_dir(changes["output_dir"])
+        if changes.get("mic") is not None:
+            entry.mic = _as_bool(changes["mic"])
         # An edit is a re-arm: a finished or missed entry becomes schedulable again.
         entry.status = STATUS_PENDING
         self.save()

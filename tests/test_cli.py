@@ -130,6 +130,15 @@ class SchtasksCommandTests(unittest.TestCase):
         self.assertNotIn('"schedule.json"', command)
         self.assertNotIn('"recordings"', command)
 
+    def test_drain_mode_reaches_the_registered_command(self):
+        args = cli.build_schtasks_args(
+            name="ZoomRecorder",
+            schedule_path="schedule.json",
+            output_dir="recordings",
+            drain=True,
+        )
+        self.assertIn("--drain", args[args.index("/TR") + 1])
+
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 
@@ -168,6 +177,15 @@ class TaskXmlTests(unittest.TestCase):
         self.assertIn("main.py run", arguments)
         self.assertIn("--schedule", arguments)
         self.assertTrue(Path(action.find("t:WorkingDirectory", NS).text).is_dir())
+
+    def test_drain_is_added_only_when_asked(self):
+        def arguments(**overrides):
+            action = self.build(**overrides).find(".//t:Exec", NS)
+            assert action is not None
+            return action.find("t:Arguments", NS).text
+
+        self.assertNotIn("--drain", arguments())
+        self.assertIn("--drain", arguments(drain=True))
 
     def test_arguments_with_xml_metacharacters_are_escaped(self):
         root = self.build(python_exe="C:/odd & dir/pythonw.exe")

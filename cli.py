@@ -557,6 +557,7 @@ def _record_session(
     notify_url: str | None = None,
     steal_meeting: bool = True,
     quality: str = "auto",
+    mic: bool = False,
 ) -> SessionResult:
     """Open the meeting, record it, stop when the window closes. Never raises Exit."""
     should_stop = should_stop or (lambda: False)
@@ -743,7 +744,7 @@ def _record_session(
             if quality in QUALITY_SIZES:
                 controller.set_video_size(*QUALITY_SIZES[quality])
             try:
-                scene.prepare(controller.call, window)
+                scene.prepare(controller.call, window, mic=mic)
             except Exception as exc:  # noqa: BLE001 - never block a recording on scene setup
                 log.warning(
                     "could not configure the OBS scene (%s); recording whatever OBS has selected", exc
@@ -773,7 +774,7 @@ def _record_session(
                 new_window.cls,
                 new_window.title,
             )
-            scene.prepare(controller.call, new_window)
+            scene.prepare(controller.call, new_window, mic=mic)
 
         def capture_luma() -> int | None:
             return scene.source_luma(controller.call)
@@ -809,7 +810,7 @@ def _record_session(
                     )
                     or target
                 )
-            scene.prepare(controller.call, target)
+            scene.prepare(controller.call, target, mic=mic)
 
         def monitor_once() -> int:
             return _monitor(
@@ -903,7 +904,7 @@ def _record_session(
                 if not controller.ensure_record_dir(output_path):
                     log.warning("OBS keeps its configured recording directory")
                 controller.ensure_recording_format("mkv")
-                scene.prepare(controller.call, alive)
+                scene.prepare(controller.call, alive, mic=mic)
                 controller.start_record()
             except (ObsError, scene.SceneError) as exc:
                 log.error("could not restart the recording after the OBS crash: %s", exc)
@@ -1202,6 +1203,12 @@ def _session_options(func):
     metavar="you@example.com",
     help="Zoom prejoin email; defaults to the schedule setting, then the built-in one.",
 )
+@click.option(
+    "--mic/--no-mic",
+    default=False,
+    show_default=True,
+    help="Also record this machine's microphone (remote audio is recorded either way).",
+)
 def record(
     url: str,
     start_at: str,
@@ -1220,6 +1227,7 @@ def record(
     notify_url: str | None,
     steal_meeting: bool,
     quality: str,
+    mic: bool,
     retention_days: int,
     window_classes: tuple[str, ...],
     window_title: str | None,
@@ -1291,6 +1299,7 @@ def record(
         notify_url=notify_url,
         steal_meeting=steal_meeting,
         quality=quality,
+        mic=mic,
     )
     _log_session(
         DEFAULT_SCHEDULE,
@@ -1363,6 +1372,12 @@ def record(
     show_default=True,
     type=click.Path(dir_okay=False),
 )
+@click.option(
+    "--mic/--no-mic",
+    default=False,
+    show_default=True,
+    help="Also record this machine's microphone; remote audio is recorded either way.",
+)
 def add_meeting(
     spec: str | None,
     url: str | None,
@@ -1374,6 +1389,7 @@ def add_meeting(
     tz_name: str | None,
     rrule: str | None,
     schedule_path: str,
+    mic: bool,
 ) -> None:
     """Add a meeting: `add "11/9/26 10am https://zoom.us/j/123"`.
 
@@ -1428,6 +1444,7 @@ def add_meeting(
             repeat=None if repeat == "none" else repeat,
             rrule=rrule,
             tz=tz_name,
+            mic=mic,
         )
     except (ScheduleError, StoreError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1525,6 +1542,11 @@ def remove_meeting(entry_id: str, schedule_path: str) -> None:
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False), help="Absolute folder for this meeting.")
 @click.option("--rrule", default=None, help="RFC 5545 rule, e.g. 'FREQ=WEEKLY;INTERVAL=2;BYDAY=WE'.")
 @click.option("--tz", "tz_name", default=None, help="IANA time zone for the recurrence, e.g. Europe/London.")
+@click.option(
+    "--mic/--no-mic",
+    default=None,
+    help="Record this machine's microphone for this entry (or stop doing so).",
+)
 def edit_meeting(
     entry_id: str,
     schedule_path: str,
@@ -1534,6 +1556,7 @@ def edit_meeting(
     output_dir: str | None,
     rrule: str | None,
     tz_name: str | None,
+    mic: bool | None,
 ) -> None:
     """Change one entry; only the flags you pass change. Same validation as the UI."""
     changes = {
@@ -1543,6 +1566,7 @@ def edit_meeting(
         "output_dir": output_dir,
         "rrule": rrule,
         "tz": tz_name,
+        "mic": mic,
     }
     given = {key: value for key, value in changes.items() if value is not None}
     if not given:
@@ -1793,6 +1817,7 @@ def run(
                 notify_url=notify_url or schedule.setting("notify_url"),
                 steal_meeting=steal_meeting,
                 quality=quality,
+                mic=entry.mic,
             )
             _log_session(
                 schedule.path,
@@ -1852,8 +1877,13 @@ def build_task_command(
     output_dir: str | Path,
     log_file: str | Path | None = None,
     python_exe: str | Path | None = None,
+    drain: bool = False,
 ) -> list[str]:
-    """The argv a scheduled task runs: interpreter, script, and the resident runner's flags."""
+    """The argv a scheduled task runs: interpreter, script, and the runner's flags.
+
+    ``drain`` catches up what is already due and exits instead of staying resident — for a machine that should
+    not keep a recorder alive all day.
+    """
     script = Path(__file__).resolve().with_name("main.py")
     command = [
         str(python_exe or _pythonw()),
@@ -1866,6 +1896,8 @@ def build_task_command(
     ]
     if log_file:
         command += ["--log-file", str(Path(log_file).expanduser().resolve())]
+    if drain:
+        command.append("--drain")
     return command
 
 
@@ -1876,13 +1908,15 @@ def build_schtasks_args(
     output_dir: str | Path,
     log_file: str | Path | None = None,
     python_exe: str | Path | None = None,
+    drain: bool = False,
 ) -> list[str]:
-    """``schtasks /Create`` command that starts the resident runner at logon."""
+    """``schtasks /Create`` command that starts the runner at logon."""
     command = build_task_command(
         schedule_path=schedule_path,
         output_dir=output_dir,
         log_file=log_file,
         python_exe=python_exe,
+        drain=drain,
     )
     return [
         "schtasks",
@@ -1907,6 +1941,7 @@ def build_task_xml(
     python_exe: str | Path | None = None,
     restart_interval: str = "PT1M",
     restart_count: int = 3,
+    drain: bool = False,
 ) -> str:
     """Task Scheduler XML for the logon runner.
 
@@ -1920,6 +1955,7 @@ def build_task_xml(
         output_dir=output_dir,
         log_file=log_file,
         python_exe=python_exe,
+        drain=drain,
     )
     executable, *arguments = command
     return (
@@ -2125,6 +2161,11 @@ def runs(schedule_path: str, limit: int, as_json: bool) -> None:
     default=False,
     help="Register via Task XML so a crashed runner is restarted (1 min apart, 3 tries).",
 )
+@click.option(
+    "--drain",
+    is_flag=True,
+    help="Record what is already due at logon, then exit instead of staying resident.",
+)
 def install(
     name: str,
     schedule_path: str,
@@ -2132,6 +2173,7 @@ def install(
     log_file: str | None,
     python_exe: str | None,
     restart_on_failure: bool,
+    drain: bool,
 ) -> None:
     """Register the resident runner to start at logon (Windows Task Scheduler)."""
     if not is_windows():
@@ -2152,6 +2194,7 @@ def install(
                     output_dir=output_dir,
                     log_file=log_file,
                     python_exe=python_exe,
+                    drain=drain,
                 )
             )
             xml_path = Path(handle.name)
@@ -2169,6 +2212,7 @@ def install(
             output_dir=output_dir,
             log_file=log_file,
             python_exe=python_exe,
+            drain=drain,
         )
         log.info("running: %s", subprocess.list2cmdline(args))
         completed = subprocess.run(args, capture_output=True, text=True)

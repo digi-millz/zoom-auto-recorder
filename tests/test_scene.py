@@ -24,6 +24,7 @@ class FakeOBS:
         self.calls: list[tuple[str, dict]] = []
         self.audio_inputs = set(audio_inputs)
         self.muted: dict[str, bool] = {}
+        self.enabled: dict[tuple[str, int], bool] = {}
 
     def __call__(self, request):
         name = type(request).__name__
@@ -47,10 +48,22 @@ class FakeOBS:
             return FakeResponse()
         if name == "GetSceneItemList":
             return FakeResponse(
-                {"sceneItems": [{"sourceName": s} for s in self.items.get(payload["sceneName"], [])]}
+                {
+                    "sceneItems": [
+                        {"sourceName": source, "sceneItemId": index}
+                        for index, source in enumerate(
+                            self.items.get(payload["sceneName"], []), start=1
+                        )
+                    ]
+                }
             )
         if name == "CreateSceneItem":
             self.items.setdefault(payload["sceneName"], []).append(payload["sourceName"])
+            return FakeResponse()
+        if name == "SetSceneItemEnabled":
+            self.enabled[(payload["sceneName"], payload["sceneItemId"])] = bool(
+                payload["sceneItemEnabled"]
+            )
             return FakeResponse()
         if name == "SetInputMute":
             target = payload["inputName"]
@@ -149,6 +162,36 @@ class PrepareTests(unittest.TestCase):
 
         with self.assertRaises(scene.SceneError):
             scene.prepare(call, WINDOW)
+
+
+class MicrophoneTests(unittest.TestCase):
+    def test_a_mic_entry_creates_the_microphone_and_turns_it_on(self) -> None:
+        obs = FakeOBS()
+        result = scene.prepare(obs, WINDOW, mic=True)
+        self.assertEqual(obs.inputs[scene.MIC_SOURCE], scene.MIC_KIND)
+        self.assertIn(scene.MIC_SOURCE, obs.items[scene.SCENE_NAME])
+        self.assertEqual(result["mic"], "on")
+
+    def test_remote_only_entries_leave_the_mic_alone(self) -> None:
+        obs = FakeOBS()
+        result = scene.prepare(obs, WINDOW)
+        self.assertNotIn(scene.MIC_SOURCE, obs.inputs)
+        self.assertEqual(result["mic"], "off")
+
+    def test_turning_the_mic_off_disables_the_item_without_deleting_it(self) -> None:
+        obs = FakeOBS()
+        scene.prepare(obs, WINDOW, mic=True)
+        result = scene.prepare(obs, WINDOW, mic=False)
+        mic_id = obs.items[scene.SCENE_NAME].index(scene.MIC_SOURCE) + 1
+        self.assertIn(scene.MIC_SOURCE, obs.inputs, "the OBS input must survive")
+        self.assertIs(obs.enabled[(scene.SCENE_NAME, mic_id)], False)
+        self.assertEqual(result["mic"], "off")
+
+    def test_a_mic_input_with_the_wrong_kind_is_a_loud_error(self) -> None:
+        obs = FakeOBS()
+        obs.inputs[scene.MIC_SOURCE] = "wasapi_output_capture"
+        with self.assertRaises(scene.SceneError):
+            scene.prepare(obs, WINDOW, mic=True)
 
 
 class CaptureProbeTests(unittest.TestCase):
