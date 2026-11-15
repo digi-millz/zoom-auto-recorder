@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -190,3 +190,40 @@ def finalize(
     if warning:
         log.warning("%s: %s", final.name, warning)
     return Recording(final, duration, size, has_video, has_audio, remuxed, warning)
+
+
+def prune(
+    directory: Path,
+    days: int,
+    *,
+    now: datetime | None = None,
+    suffixes: set[str] | None = None,
+) -> list[Path]:
+    """Delete recordings older than *days* in *directory*; returns what was removed.
+
+    Only media files are considered — the run log and the dialog screenshots live next to the recordings and must
+    survive. A missing directory, an unreadable file or a failed delete is not an error: retention is housekeeping.
+    """
+    if days <= 0:
+        return []
+    keep = suffixes if suffixes is not None else {".mp4", ".mkv", ".mov", ".ts", ".flv", ".m4v"}
+    cutoff = ((now or datetime.now()) - timedelta(days=days)).timestamp()
+    removed: list[Path] = []
+    try:
+        entries = list(Path(directory).iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        if entry.suffix.lower() not in keep:
+            continue
+        try:
+            if entry.stat().st_mtime >= cutoff:
+                continue
+            entry.unlink()
+        except OSError as exc:
+            log.debug("could not prune %s: %s", entry, exc)
+            continue
+        removed.append(entry)
+    if removed:
+        log.info("retention: removed %d recording(s) older than %d day(s)", len(removed), days)
+    return removed

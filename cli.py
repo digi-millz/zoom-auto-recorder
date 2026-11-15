@@ -21,6 +21,8 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+import invite
+import notify
 import zoom_account
 
 from obs_controller import (
@@ -30,6 +32,7 @@ from obs_controller import (
     clear_crash_flag,
     find_obs_exe,
     find_recent_recording,
+    RECORDING_SUFFIXES,
     is_obs_running,
     is_websocket_reachable,
     launch_obs,
@@ -57,6 +60,7 @@ from store import (
     StoreError,
     clear_stop,
     next_action,
+    request_stop,
     split_entry_spec,
     stop_requested,
 )
@@ -147,6 +151,10 @@ def _recording_title(window_title: str, url: str) -> str:
     return f"zoom-{match.group(1)}" if match else (title or "meeting")
 
 
+def _part_title(title: str, part: int) -> str:
+    """``"Weekly sync"`` for the first part, ``"Weekly sync (part 2)"`` after an OBS resume."""
+    return title if part <= 1 else f"{title} (part {part})"
+
 
 def free_gb(path: Path) -> float | None:
     """Free space in GB for *path*, or ``None`` when it cannot be read."""
@@ -169,6 +177,21 @@ def disk_is_low(path: Path, min_free_gb: float) -> bool:
 
 DISK_CHECK_INTERVAL = 30.0
 
+# First capture check a few seconds in (OBS needs a frame or two to start rendering), then periodically.
+BLACK_FIRST_CHECK = 10.0
+BLACK_RECHECK = 60.0
+
+# How many times a crashed OBS is relaunched mid-meeting. Two is enough to survive a bad driver update; beyond
+# that the machine is unhealthy and the parts on disk are the recording.
+MAX_OBS_RESUMES = 2
+
+# Canvas + output resolution presets. "auto" leaves whatever OBS has configured, which is what earlier runs used.
+QUALITY_SIZES = {"720p": (1280, 720), "1080p": (1920, 1080)}
+
+# How often the runner re-reads a configured calendar feed. Google refreshes its iCal export with some delay, so
+# polling faster than this buys nothing.
+CALENDAR_SYNC_INTERVAL = 900.0
+
 WAITING_ROOM_CLASS = "zWaitingRoomWndClass"
 
 
@@ -188,6 +211,9 @@ def _monitor(
     waiting_room_timeout: float = 0.0,
     output_path: Path | None = None,
     min_free_gb: float = 0.0,
+    capture_luma: Callable[[], int | None] | None = None,
+    on_black: Callable[[str], None] | None = None,
+    repoint_capture: Callable[[], None] | None = None,
 ) -> int:
     """Record until the meeting window goes away for *close_grace* seconds.
 
@@ -199,12 +225,18 @@ def _monitor(
     There is no time limit by default: the recording ends when the host closes the meeting. ``max_duration`` and
     ``waiting_room_timeout`` are the two opt-in exceptions — the second one exists because a host who never starts
     the meeting leaves us recording a waiting-room screen indefinitely.
+
+    ``capture_luma`` is sampled shortly after the start and then periodically: a black frame means a minimised
+    window or a locked session, which produce a file of pure black. That is reported through *on_black*, and one
+    re-point of the capture is attempted before giving up.
     """
     started = time.monotonic()
     gone_since: float | None = None
     waiting_since: float | None = None
     current: tuple[int, str, str] | None = None
     next_disk_check = started
+    next_luma_check = started + BLACK_FIRST_CHECK if capture_luma else None
+    black_streak = 0
     while True:
         now = time.monotonic()
         if should_stop():
@@ -268,6 +300,30 @@ def _monitor(
                     min_free_gb,
                 )
                 return EXIT_DISK
+
+        if next_luma_check is not None and now >= next_luma_check:
+            next_luma_check = now + BLACK_RECHECK
+            luma = capture_luma()  # type: ignore[misc]
+            if scene.looks_black(luma):
+                black_streak += 1
+                log.warning(
+                    "capture is black (max luminance %s, streak %d) — the Zoom window is probably "
+                    "minimised or the session locked",
+                    luma,
+                    black_streak,
+                )
+                if black_streak == 1 and repoint_capture is not None:
+                    try:
+                        repoint_capture()
+                        log.info("re-pointed the capture once; will check again in %.0fs", BLACK_RECHECK)
+                    except Exception as exc:  # noqa: BLE001 - never end a recording over a retry
+                        log.warning("could not re-point the capture: %s", exc)
+                if on_black is not None:
+                    on_black(f"capture black for {black_streak} checks (max luminance {luma})")
+            else:
+                if black_streak:
+                    log.info("capture is producing frames again (max luminance %s)", luma)
+                black_streak = 0
 
         if max_duration and now - started >= max_duration:
             log.warning("maximum recording duration (%.0fs) reached", max_duration)
@@ -402,6 +458,35 @@ class SessionResult:
     interrupted: bool = False
 
 
+def _sweep_empty_recordings(directory: Path, since: datetime) -> int:
+    """Delete zero-byte recordings this session produced.
+
+    A crash between ``StartRecord`` and the first flushed frame leaves a 0-byte file (an mp4 that never got its
+    footer, or an mkv killed inside its first second). They are unusable, they clutter the folder, and a later
+    ``find_recent_recording`` could otherwise pick one as "the" recording.
+    """
+    removed = 0
+    cutoff = since.timestamp() - 5
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.suffix.lower() not in RECORDING_SUFFIXES:
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        if stat.st_size == 0 and stat.st_mtime >= cutoff:
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                continue
+    return removed
+
+
 def _verify_recording(
     controller: ObsController,
     reported: str | None,
@@ -413,7 +498,11 @@ def _verify_recording(
     Falls back to OBS's own configured folder when it ignored --output-dir.
     """
     directories = [output_path]
-    obs_directory = controller.record_directory()
+    try:
+        obs_directory = controller.record_directory()
+    except ObsError:
+        # OBS died (the usual reason we are here); its own folder is simply unknown.
+        obs_directory = None
     if obs_directory:
         directories.append(obs_directory)
 
@@ -455,6 +544,9 @@ def _record_session(
     auto_accept: bool = False,
     auto_accept_seconds: float = 20.0,
     waiting_room_timeout: float = 0.0,
+    notify_url: str | None = None,
+    steal_meeting: bool = True,
+    quality: str = "auto",
 ) -> SessionResult:
     """Open the meeting, record it, stop when the window closes. Never raises Exit."""
     should_stop = should_stop or (lambda: False)
@@ -487,26 +579,51 @@ def _record_session(
         log.error("this tool drives the Windows Zoom client; Windows is required")
         return SessionResult(1)
 
+    # A pasted invite carries the passcode in prose; canonicalise once so the URI has ?pwd= and no dialog is
+    # needed. An unparseable URL is left exactly as given (the browser fallback may still handle it).
+    room = invite.parse(url)
+    join_url = room.url or url
+    effective_passcode = passcode or room.passcode
+    if join_url != url.strip():
+        log.info("using join link %s (from the pasted invitation)", join_url)
+
     # A stale .sentinel makes OBS open a "Crash Detected / safe mode" modal that blocks the WebSocket server.
     clear_crash_flag()
-    log.info("launching Zoom: %s", url)
+    log.info("launching Zoom: %s", join_url)
     try:
-        launch_meeting(url, mode=launch_mode, passcode=passcode)
+        launch_meeting(join_url, mode=launch_mode, passcode=effective_passcode)
     except (OSError, RuntimeError) as exc:
         log.error("could not launch Zoom: %s", exc)
         return SessionResult(1)
 
     shots_dir = output_path / "_shots" / session_started.strftime("%Y%m%d-%H%M%S")
-    watcher = DialogWatcher(
-        dry_run=not auto_accept,
-        shots_dir=shots_dir,
-        email=email or zoom_account.discover(),
-        on_alert=lambda alert: log.error(
+    def on_alert(alert) -> None:
+        log.error(
             "needs_attention: unhandled Zoom dialog %s %r (shot: %s)",
             alert.cls,
             alert.title,
             alert.screenshot or "none",
-        ),
+        )
+        notify.send(
+            notify_url,
+            notify.Event(
+                notify.NEEDS_ATTENTION,
+                meeting=alert.title or alert.cls,
+                detail=(alert.text or "")[:300],
+            ),
+        )
+
+    rules = dialogs.load_rules()
+    if not steal_meeting:
+        rules = rules.without("leave-and-join")
+        log.info("--no-steal-meeting: leaving a meeting Zoom is already in will raise needs_attention")
+
+    watcher = DialogWatcher(
+        rules=rules,
+        dry_run=not auto_accept,
+        shots_dir=shots_dir,
+        email=email or zoom_account.discover(),
+        on_alert=on_alert,
     )
     watcher.start()
 
@@ -542,36 +659,44 @@ def _record_session(
     except ObsError as exc:
         log.warning("%s", exc)
         if is_obs_running():
-            controller.close()
-            log.error(
-                "OBS is running but its WebSocket server is unreachable; enable "
-                "Tools > WebSocket Server Settings (port 4455) and pass --obs-password "
-                "when authentication is on"
+            # The process exists but the server is not listening *yet* — Windows is slow to start OBS, and a
+            # scheduled run often begins seconds after login. Give it the same grace as a launch we do ourselves.
+            log.info("OBS is running but not listening yet; waiting up to %.0fs for its WebSocket", 45.0)
+            try:
+                wait_for_websocket(controller)
+            except ObsError:
+                controller.close()
+                log.error(
+                    "OBS is running but its WebSocket server never came up; enable "
+                    "Tools > WebSocket Server Settings (port 4455) and pass --obs-password "
+                    "when authentication is on"
+                )
+                return SessionResult(EXIT_OBS)
+            log.info("OBS is reachable now; continuing")
+        else:
+            exe = find_obs_exe(obs_exe)
+            if exe is None:
+                controller.close()
+                log.error("OBS is not running and obs64.exe could not be found; pass --obs-exe")
+                return SessionResult(EXIT_OBS)
+            log.info("OBS is not running; launching %s", exe)
+            process = launch_obs(exe, start_recording=True)
+            try:
+                wait_for_websocket(controller)
+            except ObsError as late:
+                controller.close()
+                log.error(
+                    "%s; OBS pid %s was launched and may already be recording "
+                    "— stop it manually",
+                    late,
+                    process.pid,
+                )
+                return SessionResult(EXIT_OBS)
+            adopted = True
+            log.warning(
+                "recording was started by the OBS launch parameters; --output-dir does not "
+                "apply to this file"
             )
-            return SessionResult(EXIT_OBS)
-        exe = find_obs_exe(obs_exe)
-        if exe is None:
-            controller.close()
-            log.error("OBS is not running and obs64.exe could not be found; pass --obs-exe")
-            return SessionResult(EXIT_OBS)
-        log.info("OBS is not running; launching %s", exe)
-        process = launch_obs(exe, start_recording=True)
-        try:
-            wait_for_websocket(controller)
-        except ObsError as late:
-            controller.close()
-            log.error(
-                "%s; OBS pid %s was launched and may already be recording "
-                "— stop it manually",
-                late,
-                process.pid,
-            )
-            return SessionResult(EXIT_OBS)
-        adopted = True
-        log.warning(
-            "recording was started by the OBS launch parameters; --output-dir does not "
-            "apply to this file"
-        )
 
     recording_format = controller.recording_format()
     if recording_format and recording_format.lower() in {"mp4", "mov"}:
@@ -593,6 +718,11 @@ def _record_session(
                 return SessionResult(1)
             if not controller.ensure_record_dir(output_path):
                 log.warning("OBS keeps its configured recording directory")
+            # mkv is written incrementally, so a crash still leaves a playable file (an mp4 does not — measured
+            # 0 bytes); postprocess remuxes it to mp4 after the stop.
+            controller.ensure_recording_format("mkv")
+            if quality in QUALITY_SIZES:
+                controller.set_video_size(*QUALITY_SIZES[quality])
             try:
                 scene.prepare(controller.call, window)
             except Exception as exc:  # noqa: BLE001 - never block a recording on scene setup
@@ -626,18 +756,136 @@ def _record_session(
             )
             scene.prepare(controller.call, new_window)
 
-        exit_code = _monitor(
-            controller,
-            max_duration,
-            close_grace,
-            should_stop,
-            window_classes,
-            title_pattern,
-            on_window_change=repoint,
-            waiting_room_timeout=waiting_room_timeout,
-            output_path=output_path,
-            min_free_gb=min_free_gb,
-        )
+        def capture_luma() -> int | None:
+            return scene.source_luma(controller.call)
+
+        def report_black(detail: str) -> None:
+            log.error("needs_attention: %s", detail)
+            notify.send(
+                notify_url,
+                notify.Event(
+                    notify.NEEDS_ATTENTION,
+                    meeting=_recording_title(window.title, url),
+                    detail=detail,
+                ),
+            )
+
+        def monitor_once() -> int:
+            return _monitor(
+                controller,
+                max_duration,
+                close_grace,
+                should_stop,
+                window_classes,
+                title_pattern,
+                on_window_change=repoint,
+                waiting_room_timeout=waiting_room_timeout,
+                output_path=output_path,
+                min_free_gb=min_free_gb,
+                capture_luma=capture_luma,
+                on_black=report_black,
+                # Re-point at the *current* window, not the one captured at start: a black frame usually means
+                # the window was recreated, and re-preparing a stale handle would not help.
+                repoint_capture=lambda: scene.prepare(
+                    controller.call,
+                    current_meeting_window(
+                        extra_classes=window_classes, title_pattern=title_pattern
+                    )
+                    or window,
+                ),
+            )
+
+        exit_code = monitor_once()
+        part_index = 1
+        resumes = 0
+        # A clean "OBS stopped the recording" and a dead WebSocket look different from the outside, but both mean
+        # the same thing: the recording ended while the meeting did not. A force-killed OBS is always EXIT_LOST.
+        def attempt_resume() -> int | None:
+            """Relaunch OBS and restart the recording. Returns the new exit code, or ``None`` to stop trying."""
+            nonlocal controller, part_index
+            alive = current_meeting_window(
+                extra_classes=window_classes, title_pattern=title_pattern
+            )
+            if alive is None:
+                log.error("OBS stopped and the meeting window is gone; nothing left to record")
+                return None
+            log.warning(
+                "OBS stopped recording on its own (exit %s); resuming as part %d (OBS will be relaunched)",
+                exit_code,
+                part_index + 1,
+            )
+            notify.send(
+                notify_url,
+                notify.Event(
+                    notify.NEEDS_ATTENTION,
+                    meeting=_recording_title(alive.title, url),
+                    detail=f"OBS stopped mid-meeting; resumed as part {part_index + 1}",
+                ),
+            )
+            # Close the orphaned part properly and file it before starting a new one.
+            with suppress(ObsError):
+                controller.stop_record(timeout=5.0)
+            partial = _verify_recording(controller, None, output_path, session_started)
+            with suppress(ObsError):
+                controller.close()
+            if partial:
+                part_recording = postprocess.finalize(
+                    Path(partial),
+                    output_path,
+                    session_started,
+                    _part_title(_recording_title(alive.title, url), part_index),
+                )
+                log.info(
+                    "part %d kept: %s (%.0fs)",
+                    part_index,
+                    part_recording.path,
+                    part_recording.duration_sec,
+                )
+            else:
+                swept = _sweep_empty_recordings(output_path, session_started)
+                if swept:
+                    log.warning(
+                        "part %d was too short to keep (killed before OBS flushed a frame); "
+                        "removed %d empty file(s)",
+                        part_index,
+                        swept,
+                    )
+            part_index += 1
+
+            exe = find_obs_exe(obs_exe)
+            if exe is None:
+                log.error("OBS is not installed any more; the rest of the meeting will not be recorded")
+                return None
+            clear_crash_flag()
+            launch_obs(exe, start_recording=False)
+            controller = ObsController(config)
+            try:
+                wait_for_websocket(controller)
+            except ObsError as exc:
+                log.error("relaunched OBS but its WebSocket never came up: %s", exc)
+                return None
+            try:
+                if not controller.ensure_record_dir(output_path):
+                    log.warning("OBS keeps its configured recording directory")
+                controller.ensure_recording_format("mkv")
+                scene.prepare(controller.call, alive)
+                controller.start_record()
+            except (ObsError, scene.SceneError) as exc:
+                log.error("could not restart the recording after the OBS crash: %s", exc)
+                return None
+            log.info("recording resumed with a new OBS instance (part %d)", part_index)
+            return monitor_once()
+
+        while exit_code in (EXIT_RECORD, EXIT_LOST) and resumes < MAX_OBS_RESUMES:
+            resumes += 1
+            try:
+                resumed = attempt_resume()
+            except Exception as exc:  # noqa: BLE001 - a failed resume must not skip the finalize below
+                log.error("could not resume after the OBS failure: %s: %s", type(exc).__name__, exc)
+                break
+            if resumed is None:
+                break
+            exit_code = resumed
     except KeyboardInterrupt:
         interrupted = True
         if keep_recording_on_interrupt:
@@ -663,7 +911,7 @@ def _record_session(
                     Path(saved_path),
                     output_path,
                     session_started,
-                    _recording_title(window.title, url),
+                    _part_title(_recording_title(window.title, url), part_index),
                 )
                 saved_path = str(recording.path)
                 log.info(
@@ -682,6 +930,8 @@ def _record_session(
                     "no recording file found in %s or OBS's folder", output_path
                 )
                 exit_code = exit_code or EXIT_NO_FILE
+            # A crash before OBS flushed a frame leaves a 0-byte file; never leave it behind.
+            _sweep_empty_recordings(output_path, session_started)
         controller.close()
 
     return SessionResult(exit_code, saved_path, interrupted)
@@ -755,6 +1005,40 @@ def _session_options(func):
                 "Stop the recording if still in Zoom's waiting room after this many seconds; 0 waits forever. "
                 "In-meeting recordings are unaffected."
             ),
+        ),
+        click.option(
+            "--notify",
+            "notify_url",
+            default=None,
+            metavar="URL",
+            help=(
+                "Webhook called on done/failed/needs_attention (Slack, Discord or any JSON endpoint). "
+                "Defaults to the URL in the UI settings."
+            ),
+        ),
+        click.option(
+            "--steal-meeting/--no-steal-meeting",
+            "steal_meeting",
+            default=True,
+            show_default="on",
+            help=(
+                "When Zoom is already in another meeting, answer 'Leave & join' so the scheduled meeting "
+                "starts. --no-steal-meeting leaves that dialog alone and raises needs_attention instead."
+            ),
+        ),
+        click.option(
+            "--quality",
+            type=click.Choice(["auto", "720p", "1080p"]),
+            default="auto",
+            show_default=True,
+            help="Recording resolution; auto keeps whatever OBS has configured.",
+        ),
+        click.option(
+            "--retention-days",
+            default=0,
+            show_default="keep forever",
+            type=click.IntRange(min=0),
+            help="Delete recordings older than this many days after a run; 0 keeps everything.",
         ),
         click.option(
             "--min-free-gb",
@@ -841,6 +1125,10 @@ def record(
     waiting_room_timeout: float,
     keep_recording_on_interrupt: bool,
     min_free_gb: float,
+    notify_url: str | None,
+    steal_meeting: bool,
+    quality: str,
+    retention_days: int,
     window_classes: tuple[str, ...],
     window_title: str | None,
     passcode: str | None,
@@ -907,6 +1195,19 @@ def record(
         email=email,
         auto_accept=auto_accept,
         auto_accept_seconds=auto_accept_seconds,
+        notify_url=notify_url,
+        steal_meeting=steal_meeting,
+        quality=quality,
+    )
+    postprocess.prune(output_path, retention_days)
+    notify.send(
+        notify_url,
+        notify.Event(
+            notify.DONE if result.exit_code == EXIT_OK else notify.FAILED,
+            meeting=url,
+            path=result.path,
+            exit_code=result.exit_code,
+        ),
     )
     raise click.exceptions.Exit(result.exit_code)
 
@@ -1003,11 +1304,13 @@ def add_meeting(
     try:
         store = ScheduleStore(schedule_path)
         canonical = target.strftime(START_FORMAT)
+        # Two shapes of the same invite (link vs. "Meeting ID: … Passcode: …") name one meeting; compare the
+        # parsed identity, not the string.
         duplicate = next(
             (
                 item
                 for item in store.pending()
-                if item.url == url.strip() and item.start == canonical
+                if invite.same_meeting(item.url, url) and item.start == canonical
             ),
             None,
         )
@@ -1140,6 +1443,15 @@ def remove_meeting(entry_id: str, schedule_path: str) -> None:
     is_flag=True,
     help="Stop an OBS recording that no schedule entry owns when starting.",
 )
+@click.option(
+    "--calendar-url",
+    default=None,
+    metavar="URL",
+    help=(
+        "iCal feed to import meetings from every 15 min (Google Calendar's 'secret address in iCal format'); "
+        "defaults to the URL saved in the UI settings."
+    ),
+)
 @_session_options
 @click.option("--log-file", default=None, type=click.Path(dir_okay=False))
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
@@ -1151,6 +1463,7 @@ def run(
     poll: float,
     max_late: float,
     stop_orphan_recording: bool,
+    calendar_url: str | None,
     obs_port: int,
     obs_password: str | None,
     obs_exe: str | None,
@@ -1162,6 +1475,10 @@ def run(
     waiting_room_timeout: float,
     keep_recording_on_interrupt: bool,
     min_free_gb: float,
+    notify_url: str | None,
+    steal_meeting: bool,
+    quality: str,
+    retention_days: int,
     window_classes: tuple[str, ...],
     window_title: str | None,
     passcode: str | None,
@@ -1197,7 +1514,14 @@ def run(
             stop_orphan_recording,
         )
 
+        next_calendar_sync = 0.0
+
         while True:
+            feed = calendar_url or schedule.setting("calendar_url")
+            if feed and time.monotonic() >= next_calendar_sync:
+                next_calendar_sync = time.monotonic() + CALENDAR_SYNC_INTERVAL
+                _sync_calendar(schedule, feed, default_output)
+
             try:
                 schedule.reload()
             except StoreError as exc:
@@ -1250,6 +1574,10 @@ def run(
                     "skipping %s (%s): more than %.0fs late", entry.id, entry.start, max_late
                 )
                 schedule.mark(entry.id, STATUS_MISSED)
+                notify.send(
+                    notify_url or schedule.setting("notify_url"),
+                    notify.Event(notify.MISSED, meeting=entry.note or entry.url),
+                )
                 continue
 
             assert entry is not None
@@ -1300,18 +1628,31 @@ def run(
                 auto_accept=auto_accept,
                 auto_accept_seconds=auto_accept_seconds,
                 should_stop=lambda: stop_requested(schedule.path),
+                notify_url=notify_url or schedule.setting("notify_url"),
+                steal_meeting=steal_meeting,
+                quality=quality,
             )
 
             status = STATUS_DONE if result.exit_code == EXIT_OK else STATUS_FAILED
             if result.exit_code != EXIT_OK:
                 failures += 1
             schedule.mark(entry.id, status, exit_code=result.exit_code, path=result.path)
+            notify.send(
+                notify_url or schedule.setting("notify_url"),
+                notify.Event(
+                    notify.DONE if status == STATUS_DONE else notify.FAILED,
+                    meeting=entry.note or entry.url,
+                    path=result.path,
+                    exit_code=result.exit_code,
+                ),
+            )
             log.info(
                 "entry %s finished: exit %s%s",
                 entry.id,
                 result.exit_code,
                 f", saved {result.path}" if result.path else "",
             )
+            postprocess.prune(output, retention_days)
             if entry.repeat and not result.interrupted and not stop_requested(schedule.path):
                 rolled = schedule.roll_repeat(entry.id)
                 if rolled is not None:
@@ -1433,6 +1774,54 @@ def status(
     )
 
 
+
+@cli.command("stop")
+@click.option(
+    "--schedule",
+    "schedule_path",
+    default=DEFAULT_SCHEDULE,
+    show_default=True,
+    type=click.Path(dir_okay=False),
+)
+@click.option(
+    "--wait",
+    default=30.0,
+    show_default="30s",
+    type=click.FloatRange(min=0.0),
+    help="Seconds to wait for the runner to exit; 0 returns immediately.",
+)
+def stop(schedule_path: str, wait: float) -> None:
+    """Ask the resident runner to stop after its current step.
+
+    This writes a marker file rather than killing the process: a killed runner skips OBS's StopRecord, leaving the
+    recording open and the entry stuck in ``running``. The runner checks the marker while waiting, between entries
+    and during a recording, so it can stop OBS cleanly first.
+    """
+    try:
+        store = ScheduleStore(schedule_path)
+    except StoreError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    pid = RunnerLock(store.path).owner_pid()
+    if not pid:
+        console.print("[yellow]no runner is running for this schedule[/]")
+        raise click.exceptions.Exit(1)
+
+    request_stop(store.path)
+    console.print(f"[green]stop requested[/] of runner pid {pid}")
+    if wait <= 0:
+        return
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if RunnerLock(store.path).owner_pid() is None:
+            console.print("[green]runner stopped[/]")
+            return
+        time.sleep(0.5)
+    console.print(
+        "[yellow]still running[/] — it stops after the current meeting; `status` shows the pid"
+    )
+
+
 @cli.command("install")
 @click.option("--name", default="ZoomRecorder", show_default=True, help="Task Scheduler task name.")
 @click.option(
@@ -1515,7 +1904,7 @@ def uninstall(name: str) -> None:
 
 
 @cli.command("import-ics")
-@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.argument("source")
 @click.option(
     "--schedule",
     "schedule_path",
@@ -1526,15 +1915,21 @@ def uninstall(name: str) -> None:
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False))
 @click.option("--dry-run", is_flag=True, help="List what would be imported.")
 def import_ics(
-    path: str, schedule_path: str, output_dir: str | None, dry_run: bool
+    source: str, schedule_path: str, output_dir: str | None, dry_run: bool
 ) -> None:
-    """Import Zoom meetings from an .ics calendar file."""
-    from ics import parse_events
+    """Import Zoom meetings from an .ics file, or from an http(s) calendar URL.
+
+    Google Calendar's per-calendar "secret address in iCal format" is such a URL — no OAuth involved.
+    """
+    from ics import fetch, parse_events
 
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        if source.lower().startswith(("http://", "https://")):
+            text = fetch(source)
+        else:
+            text = Path(source).read_text(encoding="utf-8")
     except OSError as exc:
-        _fail(1, f"cannot read {path}: {exc}")
+        _fail(1, f"cannot read {source}: {exc}")
 
     events = parse_events(text)
     if not events:
@@ -1546,31 +1941,92 @@ def import_ics(
     except StoreError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    existing = {(entry.url, entry.start) for entry in store.entries}
-    added = skipped = 0
+    added, skipped, failed = _import_events(store, events, output_dir, dry_run)
+
+    verb = "would add" if dry_run else "added"
+    console.print(
+        f"{verb} {added} event(s), skipped {skipped} duplicate(s)"
+        + (f", {failed} with an unusable rule" if failed else "")
+    )
+
+
+def _import_events(store, events, output_dir: str | None, dry_run: bool) -> tuple[int, int, int]:
+    """Add the events that are not already scheduled. Dedupe by meeting identity + start time.
+
+    Returns ``(added, skipped, failed)``. A rule the schedule rejects leaves the occurrence imported once rather
+    than aborting the whole calendar.
+    """
+    existing = [(entry.url, entry.start) for entry in store.entries]
+    added = skipped = failed = 0
     for event in events:
         canonical = event.when.strftime(START_FORMAT)
-        if (event.url, canonical) in existing:
+        if any(
+            invite.same_meeting(url, event.url) and start == canonical
+            for url, start in existing
+        ):
             skipped += 1
             continue
+        label = f"{canonical} {event.url} ({event.summary or 'no summary'}"
+        label += f", rule={event.rrule})" if event.rrule else ")"
         if dry_run:
-            console.print(
-                f"[cyan]would add[/] {canonical} {event.url} "
-                f"({event.summary or 'no summary'}, repeat={event.repeat or 'none'})"
-            )
-        else:
+            console.print(f"[cyan]would add[/] {label}")
+            added += 1
+            existing.append((event.url, canonical))
+            continue
+        try:
             store.add(
                 url=event.url,
                 start_at=canonical,
                 output_dir=output_dir,
                 note=event.summary,
-                repeat=event.repeat,
+                rrule=event.rrule,
+                tz=event.tz,
             )
-            existing.add((event.url, canonical))
+        except ScheduleError as exc:
+            log.warning("calendar event %r could not be scheduled: %s", event.summary, exc)
+            try:
+                store.add(
+                    url=event.url,
+                    start_at=canonical,
+                    output_dir=output_dir,
+                    note=event.summary,
+                )
+            except (ScheduleError, StoreError) as again:
+                log.error("skipping calendar event %r: %s", event.summary, again)
+                failed += 1
+                continue
+            failed += 1
+        existing.append((event.url, canonical))
         added += 1
+    return added, skipped, failed
 
-    verb = "would add" if dry_run else "added"
-    console.print(f"{verb} {added} event(s), skipped {skipped} duplicate(s)")
+
+def _sync_calendar(schedule: ScheduleStore, url: str, output_dir: Path | None) -> int:
+    """Fetch a calendar feed and import any Zoom meeting that is not scheduled yet.
+
+    Failures are logged and swallowed: a calendar that is temporarily unreachable must not stop the runner from
+    recording what it already knows about.
+    """
+    import ics
+
+    try:
+        text = ics.fetch(url)
+    except (OSError, ValueError) as exc:
+        log.warning("calendar sync failed (%s): %s", url, exc)
+        return 0
+    events = ics.parse_events(text)
+    if not events:
+        return 0
+    try:
+        added, _skipped, _failed = _import_events(
+            schedule, events, str(output_dir) if output_dir else None, dry_run=False
+        )
+    except StoreError as exc:
+        log.warning("calendar sync could not write the schedule: %s", exc)
+        return 0
+    if added:
+        log.info("calendar sync: added %d meeting(s) from the feed", added)
+    return added
 
 
 def _slug(text: str) -> str:

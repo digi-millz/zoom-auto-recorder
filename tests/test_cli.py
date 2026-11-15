@@ -1,6 +1,9 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+
+from click.testing import CliRunner
 
 import cli
 
@@ -113,6 +116,39 @@ class DiskGuardTests(unittest.TestCase):
         self.assertIsNotNone(available)
         assert available is not None
         self.assertGreater(available, 0)
+
+
+class PartTitleTests(unittest.TestCase):
+    def test_first_part_has_no_suffix(self) -> None:
+        self.assertEqual(cli._part_title("Weekly sync", 1), "Weekly sync")
+
+    def test_resumed_parts_are_numbered(self) -> None:
+        self.assertEqual(cli._part_title("Weekly sync", 2), "Weekly sync (part 2)")
+        self.assertEqual(cli._part_title("zoom-85330823611", 3), "zoom-85330823611 (part 3)")
+
+
+class StopCommandTests(unittest.TestCase):
+    def test_without_a_runner_it_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            result = CliRunner().invoke(cli.cli, ["stop", "--schedule", str(schedule), "--wait", "0"])
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("no runner", result.output)
+
+    def test_it_writes_the_stop_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            schedule.write_text('{"version": 1, "settings": {}, "entries": []}', encoding="utf-8")
+            # A live pid in the lock makes this process look like the runner.
+            Path(str(schedule) + ".lock").write_text(str(os.getpid()), encoding="utf-8")
+
+            result = CliRunner().invoke(cli.cli, ["stop", "--schedule", str(schedule), "--wait", "0"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertTrue(
+                Path(str(schedule) + ".stop").exists(),
+                "the runner polls a marker file, it is never killed",
+            )
 
 if __name__ == "__main__":
     unittest.main()

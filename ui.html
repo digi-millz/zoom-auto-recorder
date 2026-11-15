@@ -240,12 +240,21 @@
           <input type="text" id="s-email" placeholder="you@example.com" spellcheck="false">
         </label>
       </div>
+      <div class="row settings-row">
+        <label>Notify webhook <input type="text" id="s-notify"
+          placeholder="https://hooks.slack.com/services/…" spellcheck="false"></label>
+        <label>Calendar feed <input type="text" id="s-calendar"
+          placeholder="https://calendar.google.com/…/basic.ics" spellcheck="false"></label>
+      </div>
       <button type="submit" class="primary">Save settings</button>
     </form>
     <p class="hint">Where finished <code>.mp4</code> files go (a relative path resolves against the app
-      folder; it is created if missing; events that set their own folder ignore it), and the address typed into
-      Zoom's "Enter your email and name" prompt. Currently: <b id="out-current">…</b> ·
-      email <b id="email-current">…</b></p>
+      folder; it is created if missing; events that set their own folder ignore it), the address typed into
+      Zoom's "Enter your email and name" prompt, an optional webhook called on
+      <code>done</code>/<code>failed</code>/<code>needs_attention</code> (Slack, Discord or any JSON endpoint), and
+      an iCal feed the runner re-imports every 15 minutes — a Google Calendar "secret address in iCal format"
+      needs no OAuth. Currently: <b id="out-current">…</b> · email <b id="email-current">…</b> ·
+      webhook <b id="notify-current">…</b> · calendar <b id="calendar-current">…</b></p>
   </section>
 
   <section class="card wide" id="log-card">
@@ -508,8 +517,12 @@ function renderPaths() {
   if (!snapshot) return;
   const folder = snapshot.output_dir || "";
   const email = snapshot.default_email || "";
+  const webhook = snapshot.notify_url || "";
+  const calendar = snapshot.calendar_url || "";
   if ($("out-current")) $("out-current").textContent = folder;
   if ($("email-current")) $("email-current").textContent = email || "not set";
+  if ($("notify-current")) $("notify-current").textContent = webhook || "off";
+  if ($("calendar-current")) $("calendar-current").textContent = calendar ? "syncing" : "off";
   const folderInput = $("f-output");
   if (folderInput && document.activeElement !== folderInput && !folderInput.dataset.dirty) {
     folderInput.value = folder;
@@ -517,6 +530,14 @@ function renderPaths() {
   const emailInput = $("s-email");
   if (emailInput && document.activeElement !== emailInput && !emailInput.dataset.dirty) {
     emailInput.value = email;
+  }
+  const notifyInput = $("s-notify");
+  if (notifyInput && document.activeElement !== notifyInput && !notifyInput.dataset.dirty) {
+    notifyInput.value = webhook;
+  }
+  const calendarInput = $("s-calendar");
+  if (calendarInput && document.activeElement !== calendarInput && !calendarInput.dataset.dirty) {
+    calendarInput.value = calendar;
   }
   // The per-event field stays empty (it is an override); its placeholder shows what will be used.
   if ($("f-email")) $("f-email").placeholder = email ? `default: ${email}` : "used only if Zoom asks";
@@ -751,6 +772,14 @@ $("s-email").addEventListener("input", (event) => {
   event.target.dataset.dirty = "1";
 });
 
+$("s-notify").addEventListener("input", (event) => {
+  event.target.dataset.dirty = "1";
+});
+
+$("s-calendar").addEventListener("input", (event) => {
+  event.target.dataset.dirty = "1";
+});
+
 $("out-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -760,11 +789,18 @@ $("out-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({
         output_dir: $("f-output").value.trim(),
         email: $("s-email").value.trim(),
+        notify_url: $("s-notify").value.trim(),
+        calendar_url: $("s-calendar").value.trim(),
       }),
     });
     delete $("f-output").dataset.dirty;
     delete $("s-email").dataset.dirty;
-    toast(`saved — recordings to ${result.output_dir}, email ${result.email || "not set"}`);
+    delete $("s-notify").dataset.dirty;
+    delete $("s-calendar").dataset.dirty;
+    toast(
+      `saved — recordings to ${result.output_dir}, email ${result.email || "not set"}, ` +
+      `webhook ${result.notify_url ? "on" : "off"}, calendar ${result.calendar_url ? "on" : "off"}`
+    );
     await refresh();
   } catch (err) {
     toast(err.message);

@@ -178,6 +178,44 @@ class WebUiTests(unittest.TestCase):
         )
         self.assertEqual(code, 400)
 
+    def test_settings_store_the_notification_url(self) -> None:
+        status, body = self.request(
+            "/api/settings",
+            method="POST",
+            payload={"notify_url": "https://hooks.example.com/abc"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["notify_url"], "https://hooks.example.com/abc")
+        _status, state = self.request("/api/status")
+        self.assertEqual(json.loads(state)["notify_url"], "https://hooks.example.com/abc")
+
+    def test_a_bad_notification_url_is_rejected(self) -> None:
+        code, _body = self.request_error(
+            "/api/settings", method="POST", payload={"notify_url": "hooks.example.com/abc"}
+        )
+        self.assertEqual(code, 400)
+
+    def test_settings_store_the_calendar_feed(self) -> None:
+        status, body = self.request(
+            "/api/settings",
+            method="POST",
+            payload={"calendar_url": "https://calendar.example.com/basic.ics"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["calendar_url"], "https://calendar.example.com/basic.ics"
+        )
+        _status, state = self.request("/api/status")
+        self.assertEqual(
+            json.loads(state)["calendar_url"], "https://calendar.example.com/basic.ics"
+        )
+
+    def test_a_bad_calendar_url_is_rejected(self) -> None:
+        code, _body = self.request_error(
+            "/api/settings", method="POST", payload={"calendar_url": "calendar.example.com"}
+        )
+        self.assertEqual(code, 400)
+
     def test_preview_returns_occurrences_for_a_rule(self):
         status, body = self.request(
             "/api/preview",

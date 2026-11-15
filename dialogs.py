@@ -155,6 +155,13 @@ class Rules:
     def for_scope(self, scope: str) -> tuple[Rule, ...]:
         return tuple(r for r in self.rules if r.scope in ("any", scope))
 
+    def without(self, *names: str) -> "Rules":
+        """A copy with some rules disabled — how a CLI flag turns a behaviour off without editing rules.json."""
+        disabled = {str(name) for name in names}
+        if not disabled:
+            return self
+        return Rules(rules=tuple(r for r in self.rules if r.name not in disabled), deny=self.deny)
+
 
 @dataclass(frozen=True)
 class Click:

@@ -51,10 +51,24 @@ matches whole lines rather than requiring exact strings.
 * window capture: `window_capture`, `window="<title>:<class>:Zoom.exe"`, `priority=0`, `method=2`,
   `capture_mode="window"`, `cursor=False`
 * audio: `wasapi_process_output_capture` (Application Audio Capture) on the same composite → Zoom's output only
-* output: **Hybrid MP4** (this install's default) — playable even after a hard kill; no remux needed. mkv is
-  still handled by `postprocess.finalize`.
+* output: this install defaulted to **Hybrid MP4**, which is **not** crash-safe in practice: force-killing OBS mid
+  recording left a **0-byte** file (the footer never got written). The recorder therefore forces **mkv**
+  (`ensure_recording_format`), which keeps what was written, and `postprocess.finalize` remuxes to mp4.
+
 * encoders present: NVENC H.264/HEVC, QSV H.264/HEVC, x264 (GTX 1060 + UHD 630). Recordings land at 1280x720 / 30 fps
   because that is the active OBS profile's canvas, not the window size (1550x830).
+
+### OBS crash behaviour (measured)
+
+| Event | Result |
+| --- | --- |
+| `Stop-Process obs64` during an mp4/hybrid_mp4 recording | 0-byte file, unusable |
+| same during an mkv recording | playable part (12.6 s / 9.1 MB in the test), remuxed to mp4 |
+| crash detection | `GetRecordStatus` fails → `EXIT_LOST` (socket `ConnectionResetError 10054`), not `EXIT_RECORD` |
+| recovery | OBS relaunched, scene re-prepared, new part started; test finished with part 1 + part 2, exit 0 |
+
+Two traps found here: `find_obs_exe` could not see a winget install (`%LOCALAPPDATA%\Microsoft\WinGet\Packages\…`),
+and a starting OBS (process up, socket not yet listening) was fatal instead of waited for.
 
 ### End-to-end result (live webinar, 5.1 s)
 

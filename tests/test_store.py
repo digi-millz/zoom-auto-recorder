@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+import invite
 import store as store_module
 from scheduler import ScheduleError
 from store import (
@@ -309,6 +310,39 @@ class BackupTests(unittest.TestCase):
                 entry["note"] for entry in json.loads(backup.read_text(encoding="utf-8"))["entries"]
             ]
             self.assertEqual(notes, ["first"], "the .bak holds the generation before the last write")
+
+
+class InviteNormalisationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.store = ScheduleStore(Path(temp.name) / "schedule.json")
+
+    def test_a_pasted_invite_is_stored_as_a_canonical_link(self) -> None:
+        entry = self.store.add(
+            url=(
+                "Join Zoom Meeting https://us06web.zoom.us/j/81234567890 "
+                "Meeting ID: 812 3456 7890 Passcode: abc123"
+            ),
+            start_at="2026-12-01 10:00",
+        )
+        self.assertEqual(entry.url, "https://us06web.zoom.us/j/81234567890?pwd=abc123")
+
+    def test_two_shapes_of_the_same_meeting_normalise_to_its_identity(self) -> None:
+        first = self.store.add(
+            url="https://us06web.zoom.us/j/81234567890?pwd=abc123", start_at="2026-12-01 10:00"
+        )
+        second = self.store.add(
+            url="Meeting ID: 812 3456 7890 Passcode: abc123", start_at="2026-12-02 10:00"
+        )
+        # The shard host is preserved (a user's link is not rewritten), so dedupe compares identity.
+        self.assertTrue(invite.same_meeting(first.url, second.url))
+        self.assertIn("pwd=abc123", first.url)
+        self.assertIn("pwd=abc123", second.url)
+
+    def test_a_non_zoom_link_is_kept_verbatim(self) -> None:
+        entry = self.store.add(url="https://example.com/webinar", start_at="2026-12-01 10:00")
+        self.assertEqual(entry.url, "https://example.com/webinar")
 
 
 if __name__ == "__main__":

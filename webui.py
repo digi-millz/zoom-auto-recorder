@@ -99,6 +99,8 @@ def status_payload(state: UiState) -> dict:
         "default_output_dir": str(state.output_dir),
         "default_tz": DEFAULT_TZ,
         "default_email": default_email(state, store),
+        "notify_url": store.setting("notify_url") or "",
+        "calendar_url": store.setting("calendar_url") or "",
         "runner_pid": RunnerLock(store.path).owner_pid(),
         "obs_reachable": _obs_reachable(state),
         "obs_port": state.obs_port,
@@ -416,7 +418,7 @@ class UiHandler(BaseHTTPRequestHandler):
 
 
     def _set_settings(self, payload: dict) -> None:
-        """Update persisted settings: the recordings folder and/or the Zoom prejoin email."""
+        """Update persisted settings: recordings folder, Zoom prejoin email, notification webhook."""
         updated: dict[str, str] = {}
         if payload.get("output_dir") is not None:
             try:
@@ -430,6 +432,16 @@ class UiHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": f"{address!r} is not an email address"})
                 return
             updated["email"] = address
+        for key, label in (("notify_url", "notification"), ("calendar_url", "calendar")):
+            if payload.get(key) is None:
+                continue
+            value = str(payload[key]).strip()
+            if value and not value.lower().startswith(("http://", "https://")):
+                self._send_json(
+                    400, {"error": f"the {label} URL must start with http:// or https://"}
+                )
+                return
+            updated[key] = value
         if not updated:
             self._send_json(400, {"error": "nothing to update"})
             return
@@ -446,6 +458,8 @@ class UiHandler(BaseHTTPRequestHandler):
             {
                 "output_dir": str(output_dir_for(self.state, store)),
                 "email": default_email(self.state, store),
+                "notify_url": store.setting("notify_url") or "",
+                "calendar_url": store.setting("calendar_url") or "",
                 "updated": sorted(updated),
             },
         )

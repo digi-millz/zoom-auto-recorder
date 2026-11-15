@@ -35,6 +35,9 @@ CAPTURE_METHOD_DXGI = 2
 GLOBAL_AUDIO_SOURCES = ("Desktop Audio", "Mic/Aux")
 CAPTURE_PRIORITY_TITLE = 0
 
+# Max luminance at or below which a frame is treated as black (same idea as `win_capture.BLACK_MAX_LUMA`).
+BLACK_LUMA = 4
+
 Call = Callable[[Any], Any]
 
 
@@ -166,3 +169,39 @@ def mute_global_audio(call: Call, names: tuple[str, ...] = GLOBAL_AUDIO_SOURCES)
     if muted:
         log.info("muted OBS global audio %s (Zoom is captured by %s)", muted, AUDIO_SOURCE)
     return muted
+
+
+def source_luma(call: Call, source: str = WINDOW_SOURCE, width: int = 320) -> int | None:
+    """Brightest pixel in a frame of *source*, or ``None`` when OBS cannot render one.
+
+    OBS returns a screenshot of the source only — no screen capture, no foreground requirement — so this works
+    while the window is minimised or the session is locked, which are exactly the cases that produce a black
+    recording. The caller decides what counts as "black"; :data:`BLACK_LUMA` is the threshold the recorder uses.
+    """
+    import base64
+    import io
+
+    from PIL import Image
+    from obswebsocket import requests
+
+    try:
+        response = call(
+            requests.GetSourceScreenshot(
+                sourceName=source, imageFormat="png", imageWidth=width, imageHeight=width
+            )
+        )
+        data = _data(response).get("imageData") or ""
+        if not data:
+            return None
+        raw = base64.b64decode(data.split(",", 1)[-1])
+        with Image.open(io.BytesIO(raw)) as image:
+            _low, high = image.convert("L").getextrema()
+        return int(high)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic probe must never break the recording
+        log.debug("could not read a frame from %r: %s", source, exc)
+        return None
+
+
+def looks_black(luma: int | None, threshold: int = BLACK_LUMA) -> bool:
+    """True only when OBS *did* render a frame and it is black. Unknown (``None``) is not a failure."""
+    return luma is not None and luma <= threshold

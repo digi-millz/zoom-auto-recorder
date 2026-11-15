@@ -35,6 +35,8 @@ for _name in (
     "GetRecordDirectory",
     "GetProfileParameter",
     "SetProfileParameter",
+    "GetVideoSettings",
+    "SetVideoSettings",
 ):
     setattr(FakeRequests, _name, type(_name, (Request,), {"name": _name}))
 
@@ -235,6 +237,103 @@ class FindRecentRecordingTests(unittest.TestCase):
             self.assertIsNone(
                 find_recent_recording([directory], since=datetime.now() - timedelta(seconds=60))
             )
+
+
+class TransportFailureTests(unittest.TestCase):
+    def test_a_dead_socket_is_reported_as_obs_error(self) -> None:
+        # A force-killed OBS gives ConnectionResetError (WinError 10054); every caller guards ObsError only.
+        class DeadClient:
+            def call(self, _request):
+                raise ConnectionResetError(10054, "An existing connection was forcibly closed")
+
+        controller = ObsController(ObsConfig(), client_factory=lambda: DeadClient())
+        controller._client = DeadClient()  # noqa: SLF001 - no socket needed for this contract
+        with self.assertRaises(ObsError) as caught:
+            controller.call(FakeRequests.GetVersion())
+        self.assertIn("lost the OBS connection", str(caught.exception))
+
+
+class RecordingFormatTests(unittest.TestCase):
+    class _Client:
+        """Answers the profile-parameter requests the format switch uses."""
+
+        def __init__(self, accepts: bool = True, value: str = "hybrid_mp4") -> None:
+            self.accepts = accepts
+            self.value = value
+
+        def call(self, request):
+            if request.name == "GetProfileParameter":
+                return Response({"parameterValue": self.value})
+            if request.name == "SetProfileParameter":
+                if self.accepts:
+                    self.value = request.dataout["parameterValue"]
+                return Response()
+            raise AssertionError(request.name)
+
+    def _controller(self, client) -> ObsController:
+        return ObsController(
+            ObsConfig(), client_factory=lambda: client, requests_module=FakeRequests
+        )
+
+    def test_switches_an_mp4_profile_to_mkv(self) -> None:
+        client = self._Client(value="hybrid_mp4")
+        controller = self._controller(client)
+        controller._client = client  # noqa: SLF001 - the contract under test needs no socket
+        self.assertEqual(controller.ensure_recording_format("mkv"), "mkv")
+        self.assertEqual(client.value, "mkv", "the profile is changed, not just reported")
+
+    def test_reports_what_obs_actually_uses_when_it_refuses(self) -> None:
+        client = self._Client(accepts=False, value="hybrid_mp4")
+        controller = self._controller(client)
+        controller._client = client  # noqa: SLF001
+        self.assertEqual(controller.ensure_recording_format("mkv"), "hybrid_mp4")
+
+    def test_already_mkv_is_a_no_op(self) -> None:
+        client = self._Client(value="mkv")
+        controller = self._controller(client)
+        controller._client = client  # noqa: SLF001
+        self.assertEqual(controller.ensure_recording_format("mkv"), "mkv")
+
+
+class VideoSizeTests(unittest.TestCase):
+    class _Client:
+        def __init__(self, width=1280, height=720, accepts=True) -> None:
+            self.width, self.height, self.accepts = width, height, accepts
+
+        def call(self, request):
+            if request.name == "GetVideoSettings":
+                return Response({"baseWidth": self.width, "baseHeight": self.height})
+            if request.name == "SetVideoSettings":
+                if self.accepts:
+                    self.width = request.dataout["baseWidth"]
+                    self.height = request.dataout["baseHeight"]
+                return Response()
+            raise AssertionError(request.name)
+
+    def _controller(self, client) -> ObsController:
+        controller = ObsController(
+            ObsConfig(), client_factory=lambda: client, requests_module=FakeRequests
+        )
+        controller._client = client  # noqa: SLF001 - no socket needed for this contract
+        return controller
+
+    def test_sets_canvas_and_output_resolution(self) -> None:
+        client = self._Client()
+        controller = self._controller(client)
+        self.assertEqual(controller.set_video_size(1920, 1080), (1920, 1080))
+        self.assertEqual((client.width, client.height), (1920, 1080))
+
+    def test_reports_what_obs_kept_when_it_refuses(self) -> None:
+        client = self._Client(accepts=False)
+        controller = self._controller(client)
+        self.assertEqual(controller.set_video_size(1920, 1080), (1280, 720))
+
+    def test_unreadable_settings_are_not_fatal(self) -> None:
+        class Broken:
+            def call(self, _request):
+                raise ConnectionResetError(10054, "gone")
+
+        self.assertIsNone(self._controller(Broken()).video_size())
 
 if __name__ == "__main__":
     unittest.main()

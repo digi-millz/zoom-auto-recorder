@@ -59,7 +59,7 @@ python main.py record --url "https://zoom.us/j/81234567890" --start "2026-11-09 
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--url` | required | Zoom join link (`https://…/j/…`, `…/w/…`, or `zoommtg://…`) |
+| `--url` | required | Zoom join link **or a whole pasted invitation** — the link, the spaced meeting ID and `Passcode:` are extracted, and the passcode is put in the URI so Zoom never asks for it |
 | `--start` | required | Local wall-clock time, `YYYY-MM-DD HH:MM` |
 | `--output-dir` | `./recordings` | Directory for the recording; OBS is pointed here when possible |
 | `--obs-port` | `4455` | OBS WebSocket port |
@@ -71,6 +71,10 @@ python main.py record --url "https://zoom.us/j/81234567890" --start "2026-11-09 
 | `--max-duration` | `0` (no limit) | Optional safety cap in seconds. By default a recording ends **only when the meeting does**. |
 | `--close-grace` | `5` | Seconds without a Zoom meeting window before OBS is stopped |
 | `--waiting-room-timeout` | `1800` (30 min) | Stop if still in the waiting room after this long; `0` waits forever. In-meeting recordings are unaffected |
+| `--notify` | settings | Webhook POSTed on `done`/`failed`/`needs_attention`/`missed` (Slack, Discord, any JSON endpoint). Carries `text` and `content` plus machine fields; one retry, 5 s, never blocks a run. Defaults to the URL saved in the UI |
+| `--steal-meeting/--no-steal-meeting` | on | Answer Zoom's "Join new meeting? … Leave & join" so the scheduled meeting starts. `--no-steal-meeting` leaves the dialog alone (the run then raises `needs_attention`) instead of pulling you out of a meeting |
+| `--quality` | `auto` | `720p` / `1080p` sets OBS's canvas **and** output resolution before recording (verified by reading it back); `auto` keeps OBS's configuration |
+| `--retention-days` | `0` (keep) | Delete recordings older than N days after a run — media files only, never the log or the dialog screenshots |
 | `--min-free-gb` | `2` | Refuse to start below this free space; `0` disables |
 | `--window-class` | none | Extra Zoom window class treated as the meeting window (repeatable) |
 | `--window-title` | none | Regex on the meeting window title (case-insensitive) |
@@ -130,10 +134,13 @@ Runner semantics:
   every `--poll` seconds, so events added later are picked up.
 - An entry that became due while the runner was down is recorded if it is at
   most `--max-late` seconds late (default 600); older entries become `missed`.
-- Stopping: `schedule.json.stop` is polled while waiting, between entries and
-  during a recording. The GUI writes it; the runner then stops OBS cleanly.
+- Stopping: `python main.py stop` (or the GUI's **Stop runner**) writes `schedule.json.stop`, which the runner polls
+  while waiting, between entries and during a recording — then it stops OBS cleanly and exits. **Never kill the
+  process**: a killed runner skips `StopRecord` (the file is left open) and its entry stays `running`.
+  `stop --wait 15` blocks until the runner is gone; `status` shows the pid if you must.
 - Entries are strictly sequential; a meeting that starts during another is
-  queued, not dropped. A lock file (`schedule.json.lock`) prevents two runners.
+  queued, not dropped. A lock file (`schedule.json.lock`) prevents two runners — a second one exits with
+  "another runner holds …".
 - A crash leaves an entry `running`; the next start marks it `failed` and warns
   about any OBS recording no entry owns (`--stop-orphan-recording` stops it).
 - The recorded file is verified (non-empty, found on disk even if OBS did not
@@ -161,8 +168,10 @@ Add form:
   a 10:00 Eastern meeting stays 10:00 Eastern no matter what zone this machine reports. Preview times are shown
   in the machine's zone, which is when the recording will actually start.
 - **Save this one to** — per-event recordings folder, overriding the global one.
-- **Recordings** card — the global folder (`settings.output_dir` in `schedule.json`), created on save; the
-  runner re-reads it per event, so changing it takes effect without a restart.
+- **Zoom email** — per-event prejoin address, overriding the Settings default.
+- **Settings** card — recordings folder (`settings.output_dir`), Zoom email (`settings.email`), and an optional
+  **notify webhook** (`settings.notify_url`). The runner re-reads the folder per event and the webhook per run, so
+  changes take effect without a restart.
 
 Security and tokens: it binds to `127.0.0.1` only, embeds a per-launch token and rejects requests without it, a
 non-local `Origin`/`Host`, or a non-JSON POST — a desktop control panel, not a network service. Only one instance
@@ -204,8 +213,11 @@ are skipped, and `FREQ=WEEKLY` becomes `repeat: weekly`.
    record directory is redirected to `--output-dir`.
 5. `StartRecord` is sent and **confirmed** by polling `GetRecordStatus` — the
    tool never assumes the recording started.
-6. Once per second it checks the meeting **window handle**
-   (`IsWindow`), the Zoom process, the OBS record state and the duration cap.
+6. The **scene is configured** for the meeting window and Zoom's audio (globals muted), and once per second the
+   meeting **window handle**, the Zoom process, the OBS record state, free disk space and the capture itself are
+   checked. Ten seconds in, and then every minute, a frame is read back from OBS: if it is black (minimised window,
+   locked session) the capture is re-pointed once and `needs_attention` is raised — instead of silently recording
+   black for an hour.
 7. On exit, `StopRecord` is sent and confirmed, the original OBS recording
    directory is restored, the socket is closed, and the file path reported by
    OBS (`RecordStateChanged`) is logged.
@@ -321,14 +333,20 @@ Run these once on the target machine; they cannot be automated here.
   config (`zoom_account.discover()`) → nothing. There is **no address in the source**; with nothing configured the
   prompt is left alone and the run reports `needs_attention`. Zoom keeps the signed-in address in encrypted
   config, so it cannot be read reliably — set it once in the UI.
-- A meeting passcode must be in the link (`?pwd=…`) or passed with `--passcode`, since the client is never asked to
-  type it.
+- A meeting passcode is taken from the link (`?pwd=…`), from a `Passcode:` line in a pasted invite, or from
+  `--passcode` — all three end up in the `zoommtg://` URL, so the client is never asked to type one. If none is
+  known and the meeting requires one, Zoom's prompt is left alone and the run reports `needs_attention`.
 - The "Join new meeting? … Leave & join" dialog is dismissed automatically so a scheduled meeting can start. It
-  leaves whatever meeting that Zoom client is already in — delete that rule from `rules.json` to refuse instead.
+  leaves whatever meeting that Zoom client is already in; pass `--no-steal-meeting` (or remove the rule from
+  `rules.json`) to refuse instead.
 - Window class names are version-dependent. `main.py inspect` dumps every Zoom window, its OCR words and the
   click it would make; `rules.json` is data, so a relabelled button is a config change, not a code change.
-- If the WebSocket connection drops mid-recording, the tool cannot stop OBS cleanly (the file is still playable —
-  OBS writes Hybrid MP4).
+- The recording container is forced to **mkv** before every start. Measured: force-killing OBS during an
+  `hybrid_mp4` recording leaves a **0-byte** file (the footer is written on shutdown), while mkv keeps everything
+  written so far; `postprocess` remuxes it to mp4 afterwards.
+- If OBS dies (or its socket drops) mid-meeting, the recorder relaunches OBS, keeps the finished part and resumes
+  into a `…-part-2` file — up to two resumes per meeting. A part shorter than OBS's first flushed frame is
+  discarded rather than left as a 0-byte file.
 - `.ics` import still flattens complex RRULEs (`BYDAY=MO,WE`, `COUNT`, `UNTIL`) to `weekly`; edit the entry
   afterwards, or add it with `--rrule`.
 - The GUI is a localhost control panel with a per-launch token, not a multi-user service; do not bind it to a

@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+import invite
 import recurrence
 
 from scheduler import START_FORMAT, ScheduleError, parse_when
@@ -202,9 +203,12 @@ class ScheduleStore:
         if clean_email and ("@" not in clean_email or clean_email.endswith("@")):
             raise ScheduleError(f"{clean_email!r} is not an email address")
         self.reload()
+        # Accept a whole pasted invite: keep the canonical link (with ?pwd=) so the runner never has to type a
+        # passcode, and so two people pasting the same meeting in different shapes dedupe to one entry.
+        canonical_url = invite.parse(url).url or url.strip()
         entry = Entry(
             id=uuid.uuid4().hex[:8],
-            url=url.strip(),
+            url=canonical_url,
             start=start.strftime(START_FORMAT),
             output_dir=output_dir,
             note=note.strip(),

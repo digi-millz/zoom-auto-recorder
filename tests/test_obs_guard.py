@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import obs_controller
 
@@ -57,6 +59,49 @@ class CrashFlagTests(unittest.TestCase):
                 self.assertTrue(marker.exists())
             finally:
                 obs_controller.is_obs_running = original
+
+
+class FindObsExeTests(unittest.TestCase):
+    """A winget / per-user install never touches PATH or Program Files."""
+
+    def test_winget_package_layout_is_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp)
+            exe = (
+                local
+                / "Microsoft"
+                / "WinGet"
+                / "Packages"
+                / "OBSProject.OBSStudio_Microsoft.Winget.Source_8wekyb3d8bbwe"
+                / "bin"
+                / "64bit"
+                / "obs64.exe"
+            )
+            exe.parent.mkdir(parents=True)
+            exe.write_text("", encoding="utf-8")
+
+            with mock.patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": str(local), "ProgramFiles": str(local / "nope"),
+                 "ProgramFiles(x86)": str(local / "nope86")},
+            ), mock.patch.object(obs_controller, "shutil", mock.Mock(which=lambda _n: None)):
+                self.assertEqual(obs_controller.find_obs_exe(), exe)
+
+    def test_explicit_path_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "obs64.exe"
+            exe.write_text("", encoding="utf-8")
+            self.assertEqual(obs_controller.find_obs_exe(exe), exe)
+
+    def test_absent_install_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": tmp, "ProgramFiles": str(Path(tmp) / "a"),
+                 "ProgramFiles(x86)": str(Path(tmp) / "b")},
+            ), mock.patch.object(obs_controller, "shutil", mock.Mock(which=lambda _n: None)), \
+               mock.patch.object(obs_controller, "_obs_from_registry", lambda: None):
+                self.assertIsNone(obs_controller.find_obs_exe())
 
 
 if __name__ == "__main__":

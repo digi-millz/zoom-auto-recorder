@@ -151,5 +151,48 @@ class PrepareTests(unittest.TestCase):
             scene.prepare(call, WINDOW)
 
 
+class CaptureProbeTests(unittest.TestCase):
+    @staticmethod
+    def _response(image) -> FakeResponse:
+        import base64
+        import io
+
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG")
+        data = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+        return FakeResponse({"imageData": data})
+
+    def test_black_frame_is_reported_as_black(self) -> None:
+        from PIL import Image
+
+        def call(_request):
+            return self._response(Image.new("RGB", (32, 32), (0, 0, 0)))
+
+        self.assertEqual(scene.source_luma(call), 0)
+        self.assertTrue(scene.looks_black(0))
+
+    def test_picture_is_not_black(self) -> None:
+        from PIL import Image
+
+        def call(_request):
+            return self._response(Image.new("RGB", (32, 32), (200, 200, 200)))
+
+        luma = scene.source_luma(call)
+        self.assertIsNotNone(luma)
+        assert luma is not None
+        self.assertGreater(luma, scene.BLACK_LUMA)
+        self.assertFalse(scene.looks_black(luma))
+
+    def test_missing_image_data_is_unknown_not_black(self) -> None:
+        self.assertIsNone(scene.source_luma(lambda _request: FakeResponse({})))
+        self.assertFalse(scene.looks_black(None), "unknown must never be treated as a failure")
+
+    def test_a_failing_request_never_raises(self) -> None:
+        def call(_request):
+            raise RuntimeError("socket gone")
+
+        self.assertIsNone(scene.source_luma(call))
+
+
 if __name__ == "__main__":
     unittest.main()

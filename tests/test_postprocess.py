@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import postprocess
@@ -91,6 +92,39 @@ class FinalizeTests(unittest.TestCase):
             self.assertFalse(result.remuxed)
             self.assertEqual(result.path.suffix, ".mp4")
             self.assertTrue(result.path.exists())
+
+
+class PruneTests(unittest.TestCase):
+    def _age(self, path, days):
+        stamp = (datetime.now() - timedelta(days=days)).timestamp()
+        os.utime(path, (stamp, stamp))
+
+    def test_removes_only_old_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old, fresh, log = root / "old.mp4", root / "fresh.mp4", root / "runner.log"
+            for path in (old, fresh, log):
+                path.write_bytes(b"x")
+            self._age(old, 40)
+            self._age(log, 40)
+
+            removed = postprocess.prune(root, 30)
+
+            self.assertEqual([p.name for p in removed], ["old.mp4"])
+            self.assertTrue(fresh.exists())
+            self.assertTrue(log.exists(), "logs live next to recordings and must survive")
+
+    def test_zero_days_keeps_everything(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "old.mp4"
+            old.write_bytes(b"x")
+            self._age(old, 4000)
+            self.assertEqual(postprocess.prune(root, 0), [])
+            self.assertTrue(old.exists())
+
+    def test_missing_directory_is_not_an_error(self) -> None:
+        self.assertEqual(postprocess.prune(Path("Z:/definitely-not-here"), 30), [])
 
 
 if __name__ == "__main__":

@@ -91,7 +91,12 @@ class ObsController:
     def _call(self, request: Any) -> Any:
         if self._client is None:
             raise ObsError("not connected to OBS")
-        result = self._client.call(request)
+        try:
+            result = self._client.call(request)
+        except Exception as exc:  # noqa: BLE001 - every transport failure must look like ObsError
+            # obs-websocket raises raw websocket/socket errors when OBS dies (a force-kill gives
+            # ConnectionResetError 10054). Callers only guard ObsError, so leaking these ended the process.
+            raise ObsError(f"lost the OBS connection: {type(exc).__name__}: {exc}") from exc
         if getattr(result, "status", None) is False:
             name = getattr(request, "name", type(request).__name__)
             raise ObsError(f"OBS rejected {name}: {getattr(result, 'datain', {})}")
@@ -334,6 +339,77 @@ class ObsController:
                 return value
         return None
 
+    def ensure_recording_format(self, fmt: str = "mkv") -> str | None:
+        """Force the recording container, because only mkv survives a crash.
+
+        Measured: force-killing OBS during an mp4 (even ``hybrid_mp4``) recording leaves a **0-byte** file — the
+        footer is written on shutdown. mkv is written incrementally, so the same crash leaves a playable file, and
+        ``postprocess`` remuxes it afterwards. Returns the format OBS reports afterwards.
+        """
+        current = self.recording_format()
+        if current == fmt:
+            return current
+        for category in ("SimpleOutput", "AdvOut"):
+            with suppress(Exception):
+                self._call(
+                    self._requests().SetProfileParameter(
+                        parameterCategory=category, parameterName="RecFormat2", parameterValue=fmt
+                    )
+                )
+        after = self.recording_format()
+        if after == fmt:
+            log.info("OBS recording container set to %s (a crash still leaves a playable file)", fmt)
+        else:
+            log.warning(
+                "OBS refused the %s container (it reports %r); if OBS dies mid-recording the file will be "
+                "unusable — set Settings > Output > Recording Format to mkv",
+                fmt,
+                after,
+            )
+        return after
+
+    def video_size(self) -> tuple[int, int] | None:
+        """Current canvas/output resolution as ``(width, height)``, or ``None`` if OBS will not say."""
+        try:
+            data = self._call(self._requests().GetVideoSettings()).datain or {}
+            return int(data["baseWidth"]), int(data["baseHeight"])
+        except Exception as exc:  # noqa: BLE001 - a diagnostic read must not break a recording
+            log.debug("could not read OBS video settings: %s", exc)
+            return None
+
+    def set_video_size(self, width: int, height: int, fps: int = 30) -> tuple[int, int] | None:
+        """Set canvas and output resolution, keeping them equal, and report what OBS ended up with.
+
+        Window capture scales the Zoom window into the canvas, so this is the knob that decides whether shared text
+        is legible. Verified by reading the settings back: a refused change is reported, not assumed.
+        """
+        try:
+            self._call(
+                self._requests().SetVideoSettings(
+                    baseWidth=width,
+                    baseHeight=height,
+                    outputWidth=width,
+                    outputHeight=height,
+                    fpsNumerator=fps,
+                    fpsDenominator=1,
+                )
+            )
+        except ObsError as exc:
+            log.warning("could not set the recording resolution to %dx%d: %s", width, height, exc)
+            return None
+        actual = self.video_size()
+        if actual == (width, height):
+            log.info("OBS canvas set to %dx%d @ %d fps", width, height, fps)
+        elif actual is not None:
+            log.warning(
+                "OBS reports %dx%d after asking for %dx%d; the recording keeps OBS's resolution",
+                actual[0],
+                actual[1],
+                width,
+                height,
+            )
+        return actual
+
 
 # --------------------------------------------------------------------------- #
 # OBS discovery, recording verification and the standalone launcher
@@ -401,26 +477,49 @@ def _obs_from_registry() -> Path | None:
     return None
 
 
-def find_obs_exe(explicit: str | Path | None = None) -> Path | None:
-    """Locate ``obs64.exe``: explicit flag, env var, PATH, Program Files, registry."""
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(Path(explicit))
-    env = os.environ.get("OBS_EXE")
-    if env:
-        candidates.append(Path(env))
-    for name in ("obs64.exe", "obs.exe"):
-        found = shutil.which(name)
-        if found:
-            candidates.append(Path(found))
-    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
-        if base:
-            candidates.append(Path(base) / "obs-studio" / "bin" / "64bit" / "obs64.exe")
+def _obs_install_candidates() -> list[Path]:
+    """Every place an OBS install hides on Windows, in the order worth checking.
+
+    Besides the official installer's ``Program Files`` layout, this covers the two per-user installs that do *not*
+    touch PATH or the registry: ``winget``'s package directory and the "install for me only" location. Without
+    these, a machine where OBS is closed looks like "OBS is not installed".
+    """
+    relative = Path("bin") / "64bit" / "obs64.exe"
+    roots = [
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+    ]
+    candidates = [Path(root) / "obs-studio" / relative for root in roots if root]
+
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(Path(local) / "Programs" / "obs-studio" / relative)
+        # winget keeps per-user packages under this prefix and never adds a Start Menu entry.
+        winget = Path(local) / "Microsoft" / "WinGet" / "Packages"
+        if winget.is_dir():
+            candidates.extend(
+                sorted(winget.glob("OBSProject.OBSStudio*/" + str(relative)), reverse=True)
+            )
     registry = _obs_from_registry()
     if registry:
         candidates.append(registry)
+    return candidates
 
-    for candidate in candidates:
+
+def find_obs_exe(explicit: str | Path | None = None) -> Path | None:
+    """Locate ``obs64.exe``: explicit flag, env var, PATH, then the known install locations."""
+    if explicit:
+        candidate = Path(explicit)
+        if candidate.is_file():
+            return candidate
+    env = os.environ.get("OBS_EXE")
+    if env and Path(env).is_file():
+        return Path(env)
+    for name in ("obs64.exe", "obs.exe"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    for candidate in _obs_install_candidates():
         if candidate.is_file():
             return candidate
     return None
