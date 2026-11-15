@@ -1,12 +1,100 @@
+import json
 import os
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
 import cli
+from window_manager import WindowInfo
+
+
+MEETING = WindowInfo(7, 1, "Weekly sync", "ZPContentViewWndClass", True, 1280, 720)
+WAITING = WindowInfo(8, 1, "Zoom Meeting", cli.WAITING_ROOM_CLASS, True, 1280, 720)
+
+
+class FakeController:
+    """Counts polls so a test can stop the loop without touching OBS."""
+
+    def __init__(self, recording=True):
+        self.recording = recording
+        self.calls = 0
+
+    def is_recording(self):
+        self.calls += 1
+        return self.recording
+
+
+class MonitorLoopTests(unittest.TestCase):
+    def monitor(self, windows, **kwargs):
+        """Drive `_monitor` with a scripted window sequence; sleeps are removed."""
+        options = dict(
+            controller=FakeController(),
+            max_duration=0.0,
+            close_grace=0.0,
+            should_stop=lambda: False,
+            output_path=None,
+            min_free_gb=0.0,
+            extra_classes=(),
+            title_pattern=None,
+        )
+        options.update(kwargs)
+        with patch.object(cli, "current_meeting_window", side_effect=windows), patch.object(
+            cli, "find_process", return_value=1234
+        ), patch.object(cli.time, "sleep", return_value=None):
+            return cli._monitor(**options)
+
+    def test_it_stops_after_the_window_is_gone_for_the_grace_period(self):
+        code = self.monitor([MEETING, MEETING, None, None])
+        self.assertEqual(code, cli.EXIT_OK)
+
+    def test_a_stop_request_ends_the_loop_before_touching_windows(self):
+        with patch.object(cli, "current_meeting_window") as lookup:
+            code = cli._monitor(
+                None, 0.0, 0.0, should_stop=lambda: True, extra_classes=()
+            )
+        self.assertEqual(code, cli.EXIT_OK)
+        lookup.assert_not_called()
+
+    def test_low_disk_stops_the_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(cli, "disk_is_low", return_value=True):
+                code = self.monitor(
+                    [MEETING] * 5,
+                    output_path=Path(tmp),
+                    min_free_gb=1.0,
+                    should_stop=lambda: False,
+                )
+        self.assertEqual(code, cli.EXIT_DISK)
+
+    def test_a_black_capture_repoints_once_then_alerts(self):
+        repoints = []
+        alerts = []
+        controller = FakeController()
+        with patch.object(cli, "BLACK_FIRST_CHECK", 0.0), patch.object(
+            cli, "BLACK_RECHECK", 0.0
+        ):
+            code = self.monitor(
+                [MEETING] * 8,
+                controller=controller,
+                should_stop=lambda: controller.calls >= 4,
+                capture_luma=lambda: 0,
+                repoint_capture=lambda: repoints.append(1),
+                on_black=alerts.append,
+            )
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertEqual(len(repoints), 1, "re-point exactly once, then alarm")
+        self.assertGreaterEqual(len(alerts), 2)
+
+    def test_an_expired_waiting_room_stops_the_recording(self):
+        with patch.object(cli, "waiting_room_expired", return_value=True):
+            code = self.monitor(
+                [WAITING] * 6, waiting_room_timeout=60.0, should_stop=lambda: False
+            )
+        self.assertEqual(code, cli.EXIT_OK)
 
 
 class SchtasksCommandTests(unittest.TestCase):
@@ -41,6 +129,51 @@ class SchtasksCommandTests(unittest.TestCase):
         command = args[args.index("/TR") + 1]
         self.assertNotIn('"schedule.json"', command)
         self.assertNotIn('"recordings"', command)
+
+
+NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+
+
+class TaskXmlTests(unittest.TestCase):
+    def build(self, **overrides):
+        options = dict(
+            schedule_path="schedule.json",
+            output_dir="recordings",
+            python_exe="pythonw.exe",
+        )
+        options.update(overrides)
+        return ET.fromstring(cli.build_task_xml(**options))
+
+    def test_it_starts_at_logon_and_restarts_a_crashed_runner(self):
+        root = self.build()
+        self.assertIsNotNone(root.find(".//t:LogonTrigger", NS))
+        restart = root.find(".//t:RestartOnFailure", NS)
+        assert restart is not None
+        self.assertEqual(restart.find("t:Interval", NS).text, "PT1M")
+        self.assertEqual(restart.find("t:Count", NS).text, "3")
+
+    def test_the_task_is_not_killed_after_a_few_days(self):
+        root = self.build()
+        self.assertEqual(root.find(".//t:ExecutionTimeLimit", NS).text, "PT0S")
+        self.assertEqual(
+            root.find(".//t:MultipleInstancesPolicy", NS).text, "IgnoreNew"
+        )
+
+    def test_the_action_runs_the_resident_runner(self):
+        root = self.build()
+        action = root.find(".//t:Exec", NS)
+        assert action is not None
+        self.assertEqual(action.find("t:Command", NS).text, "pythonw.exe")
+        arguments = action.find("t:Arguments", NS).text
+        self.assertIn("main.py run", arguments)
+        self.assertIn("--schedule", arguments)
+        self.assertTrue(Path(action.find("t:WorkingDirectory", NS).text).is_dir())
+
+    def test_arguments_with_xml_metacharacters_are_escaped(self):
+        root = self.build(python_exe="C:/odd & dir/pythonw.exe")
+        self.assertEqual(
+            root.find(".//t:Command", NS).text, "C:/odd & dir/pythonw.exe"
+        )
 
 
 class DiskPreflightTests(unittest.TestCase):
@@ -172,6 +305,67 @@ class SessionGuardTests(unittest.TestCase):
                 )
         self.assertEqual(result.exit_code, cli.EXIT_SESSION)
         launch.assert_not_called()
+
+
+class RunLogCommandTests(unittest.TestCase):
+    def test_an_empty_log_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = CliRunner().invoke(
+                cli.cli, ["runs", "--schedule", str(Path(tmp) / "schedule.json")]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no runs recorded yet", result.output)
+
+    def test_records_print_newest_first_and_as_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            cli.append_run(schedule, {"ts": "t1", "status": "done", "seconds": 60, "meeting": "A"})
+            cli.append_run(schedule, {"ts": "t2", "status": "failed", "seconds": 5, "meeting": "B"})
+            human = CliRunner().invoke(cli.cli, ["runs", "--schedule", str(schedule)])
+            machine = CliRunner().invoke(cli.cli, ["runs", "--schedule", str(schedule), "--json"])
+        self.assertLess(human.output.index("t2"), human.output.index("t1"))
+        parsed = [json.loads(line) for line in machine.output.splitlines() if line.strip()]
+        self.assertEqual([record["ts"] for record in parsed], ["t2", "t1"])
+
+    def test_a_session_outcome_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            cli._log_session(
+                schedule,
+                entry_id="abc",
+                meeting="Weekly sync",
+                scheduled="2026-11-14 10:00",
+                result=cli.SessionResult(cli.EXIT_OK, Path("E:/rec/x.mp4"), False),
+                seconds=90,
+            )
+            record = cli.read_runs(schedule)[0]
+        self.assertEqual(Path(record["path"]), Path("E:/rec/x.mp4"))
+        self.assertEqual(record["entry"], "abc")
+        self.assertEqual(record["meeting"], "Weekly sync")
+        self.assertEqual(record["status"], "done")
+        self.assertEqual(record["exit_code"], 0)
+        self.assertEqual(record["seconds"], 90)
+
+    def test_a_session_with_screenshots_gets_an_html_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            shots = Path(tmp) / "shots"
+            shots.mkdir()
+            (shots / "dialog.png").write_bytes(b"fake png")
+            cli._log_session(
+                schedule,
+                entry_id="abc",
+                meeting="Weekly sync",
+                scheduled="2026-11-14 10:00",
+                result=cli.SessionResult(cli.EXIT_OK, Path("E:/rec/x.mp4"), False, shots),
+                seconds=90,
+            )
+            record = cli.read_runs(schedule)[0]
+            report_file = Path(record["report"])
+            page = report_file.read_text(encoding="utf-8")
+        self.assertEqual(report_file.parent.name, "reports")
+        self.assertIn("Weekly sync", page)
+        self.assertIn("data:image/png;base64,", page)
 
 if __name__ == "__main__":
     unittest.main()

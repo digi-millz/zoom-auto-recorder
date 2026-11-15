@@ -17,6 +17,7 @@ zoom-auto-recorder/
 ├── webui.py             # localhost JSON API + runner control (token-guarded)
 ├── ui.html              # calendar page (no external assets)
 ├── ics.py               # minimal .ics -> schedule importer
+├── report.py            # per-run HTML report (record + screenshots, self-contained)
 ├── requirements.txt
 ├── tests/               # unittest suite (no Zoom/OBS required)
 └── README.md
@@ -95,6 +96,8 @@ python main.py add --url "https://zoom.us/j/81234567890?pwd=abc" `
 python main.py list                  # pending entries
 python main.py list --all --json     # full history, machine-readable
 python main.py remove 4bfaf89e       # by id
+python main.py edit 4bfaf89e --start "2026-11-20 10:00" --note "Weekly sync"
+python main.py edit 4bfaf89e --rrule "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE" --tz Europe/London
 python main.py run                   # resident: wait, record, repeat
 python main.py run --once            # record at most one due event, then exit
 python main.py run --drain           # process what is due, exit instead of waiting
@@ -176,6 +179,10 @@ Add form:
   **notify webhook** (`settings.notify_url`). The runner re-reads the folder per event and the webhook per run, so
   changes take effect without a restart.
 
+- **Add calendar event** — the timezone field suggests common zones but accepts any IANA name
+  (`Europe/London`, `Australia/Perth`, …); an empty field means the machine's own zone. A rule the
+  recorder cannot express is refused at save time, not at 03:00.
+
 Security and tokens: it binds to `127.0.0.1` only, embeds a per-launch token and rejects requests without it, a
 non-local `Origin`/`Host`, or a non-JSON POST — a desktop control panel, not a network service. Only one instance
 can own the port; a second launch exits with a message telling you to reuse the running one. An open tab from a
@@ -188,6 +195,31 @@ python main.py install              # Task Scheduler ONLOGON, starts it immediat
 python main.py status               # runner pid, counts, next event, OBS reachability
 python main.py status --json
 python main.py uninstall
+```
+
+`install` uses `schtasks /SC ONLOGON`, which cannot express restart-on-failure
+and defaults to a 72-hour execution limit — a resident runner would be killed on
+day 3. `install --restart-on-failure` registers via Task Scheduler XML instead:
+logon trigger, `ExecutionTimeLimit=PT0S` (unlimited), `MultipleInstancesPolicy=IgnoreNew`
+(a double start is ignored; the runner's own lock also guards), and
+`RestartOnFailure` every minute, up to 3 times when the runner exits non-zero.
+An exit 0 (stop marker, or `--drain` done) is not a failure and is not restarted.
+
+## Run history
+
+Every session — runner or single-shot `record` — appends one JSON line to
+`logs/runs.jsonl` next to `schedule.json` (`ts`, `entry`, `meeting`, `scheduled`,
+`status`, `exit_code`, `seconds`, `path`, `detail`, `report`). A failed append is a logged
+warning, never a failed recording. A damaged line is skipped on read.
+
+When the session took screenshots (dialog handling), the same run also writes
+`logs/reports/<stamp>-<entry>.html`: the record, the final path, and every
+screenshot embedded as a data URI, so the file stands alone. `runs` prints its path.
+
+```powershell
+python main.py runs                 # last 10, newest first
+python main.py runs --limit 50
+python main.py runs --json          # one object per line, for scripts
 ```
 
 ## Import a calendar (file or feed)

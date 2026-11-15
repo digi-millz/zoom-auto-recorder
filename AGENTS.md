@@ -73,6 +73,7 @@ the road.
 | `win_capture.py` | window frames (`PrintWindow`), screen origin, black-frame check |
 | `scene.py` | OBS scene bootstrap: window capture, app audio, global-audio mute |
 | `postprocess.py` | remux, rename, `ffprobe` verification |
+| `report.py` | per-run HTML report: record + screenshots → one self-contained file (pure) |
 | `rules.json` | dialog labels and limits (data, not code) |
 | `tests/` | unittest; live-meeting evidence in `docs/spikes.md` |
 

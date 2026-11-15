@@ -163,8 +163,9 @@
           </select>
         </label>
         <label>Timezone
-          <select id="f-tz">
-            <option value="America/New_York" selected>Eastern (New York)</option>
+          <input id="f-tz" list="tz-list" placeholder="machine zone, or Europe/London" autocomplete="off">
+          <datalist id="tz-list">
+            <option value="America/New_York">Eastern (New York)</option>
             <option value="America/Chicago">Central (Chicago)</option>
             <option value="America/Denver">Mountain (Denver)</option>
             <option value="America/Phoenix">Arizona (Phoenix)</option>
@@ -180,6 +181,7 @@
             <option value="Europe/Madrid">Madrid</option>
             <option value="Europe/Warsaw">Warsaw</option>
             <option value="Europe/Moscow">Moscow</option>
+            <option value="Africa/Johannesburg">Johannesburg</option>
             <option value="Asia/Dubai">Dubai</option>
             <option value="Asia/Kolkata">India (Kolkata)</option>
             <option value="Asia/Singapore">Singapore</option>
@@ -187,7 +189,7 @@
             <option value="Asia/Tokyo">Tokyo</option>
             <option value="Australia/Sydney">Sydney</option>
             <option value="Pacific/Auckland">Auckland</option>
-          </select>
+          </datalist>
         </label>
       </div>
       <div class="days" id="f-days">
@@ -483,16 +485,13 @@ function reloadForNewToken() {
   setTimeout(() => location.reload(), 600);
 }
 
-// The server owns the default zone (America/New_York); apply it once, never over a choice the user made.
+// The server owns the default zone (the machine's); apply it once, never over a choice the user made.
 let tzApplied = false;
 function applyDefaultTz() {
   if (tzApplied || !snapshot) return;
   tzApplied = true;
-  const select = $("f-tz");
-  const wanted = snapshot.default_tz;
-  if (wanted && [...select.options].some((option) => option.value === wanted)) {
-    select.value = wanted;
-  }
+  const field = $("f-tz");
+  if (!field.value && snapshot.default_tz) field.value = snapshot.default_tz;
 }
 
 async function api(path, options) {
@@ -584,9 +583,7 @@ function startEdit(entry) {
   $("f-note").value = entry.note || "";
   $("f-email").value = entry.email || "";
   $("f-folder").value = entry.output_dir || "";
-  if (entry.tz && [...$("f-tz").options].some((option) => option.value === entry.tz)) {
-    $("f-tz").value = entry.tz;
-  }
+  $("f-tz").value = entry.tz || "";
   const parsed = parseRule(entry.rrule || "");
   document.querySelectorAll(".wd").forEach((box) => {
     box.checked = !!(parsed && parsed.days && parsed.days.includes(box.value));

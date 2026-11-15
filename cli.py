@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable, NoReturn
+from xml.sax.saxutils import escape as xml_escape
 
 import click
 from rich.console import Console
@@ -58,8 +60,10 @@ from store import (
     RunnerLock,
     ScheduleStore,
     StoreError,
+    append_run,
     clear_stop,
     next_action,
+    read_runs,
     request_stop,
     split_entry_spec,
     stop_requested,
@@ -83,6 +87,7 @@ from window_manager import (
 import dialogs
 import ocr
 import postprocess
+import report
 import scene
 import win_capture
 from watcher import DialogWatcher
@@ -460,6 +465,7 @@ class SessionResult:
     exit_code: int
     path: str | None = None
     interrupted: bool = False
+    shots_dir: Path | None = None
 
 
 def _sweep_empty_recordings(directory: Path, since: datetime) -> int:
@@ -963,7 +969,7 @@ def _record_session(
             _sweep_empty_recordings(output_path, session_started)
         controller.close()
 
-    return SessionResult(exit_code, saved_path, interrupted)
+    return SessionResult(exit_code, saved_path, interrupted, shots_dir)
 
 
 def _record_session_awake(**kwargs) -> SessionResult:
@@ -972,6 +978,55 @@ def _record_session_awake(**kwargs) -> SessionResult:
         if not granted:
             log.warning("could not keep the display awake; a screen blank would record black")
         return _record_session(**kwargs)
+
+
+def _write_report(
+    schedule_path: str | Path, record: dict[str, object], shots_dir: Path | None
+) -> Path | None:
+    """Write ``logs/reports/<stamp>-<entry>.html`` for this session, or ``None`` without screenshots."""
+    if shots_dir is None:
+        return None
+    try:
+        shots = sorted(path for path in Path(shots_dir).iterdir() if path.is_file())
+        directory = Path(schedule_path).expanduser().resolve().with_name("logs") / "reports"
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = str(record["ts"]).replace(":", "").replace("-", "")
+        target = directory / f"{stamp}-{record.get('entry') or 'manual'}.html"
+        target.write_text(report.render(record, shots), encoding="utf-8")
+        return target
+    except OSError as exc:
+        log.warning("could not write the run report: %s", exc)
+        return None
+
+
+def _log_session(
+    schedule_path: str | Path,
+    *,
+    entry_id: str | None,
+    meeting: str,
+    scheduled: str,
+    result: SessionResult,
+    seconds: int,
+) -> None:
+    """Append the outcome to ``logs/runs.jsonl``. Bookkeeping never fails a recording."""
+    record: dict[str, object] = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "entry": entry_id,
+        "meeting": meeting,
+        "scheduled": scheduled,
+        "status": "done" if result.exit_code == EXIT_OK else "failed",
+        "exit_code": result.exit_code,
+        "seconds": seconds,
+        "path": str(result.path) if result.path else "",
+        "detail": "interrupted" if result.interrupted else "",
+    }
+    written = _write_report(schedule_path, record, result.shots_dir)
+    if written is not None:
+        record["report"] = str(written)
+    try:
+        append_run(schedule_path, record)
+    except OSError as exc:
+        log.warning("could not append to the run log: %s", exc)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -1213,6 +1268,7 @@ def record(
             _fail(1, message)
         log.warning("%s; starting immediately", message)
 
+    started_mono = time.monotonic()
     result = _record_session_awake(
         url=url,
         output_path=output_path,
@@ -1235,6 +1291,14 @@ def record(
         notify_url=notify_url,
         steal_meeting=steal_meeting,
         quality=quality,
+    )
+    _log_session(
+        DEFAULT_SCHEDULE,
+        entry_id=None,
+        meeting=_recording_title("", url),
+        scheduled=target.strftime("%Y-%m-%d %H:%M"),
+        result=result,
+        seconds=int(time.monotonic() - started_mono),
     )
     postprocess.prune(output_path, retention_days)
     notify.send(
@@ -1440,6 +1504,66 @@ def remove_meeting(entry_id: str, schedule_path: str) -> None:
     console.print(f"[green]removed[/] {entry_id}")
 
 
+@cli.command("edit")
+@click.argument("entry_id")
+@click.option(
+    "--schedule",
+    "schedule_path",
+    default=DEFAULT_SCHEDULE,
+    show_default=True,
+    type=click.Path(dir_okay=False),
+)
+@click.option("--start", "start_at", default=None, help="New local start, e.g. '2026-11-20 10:00'.")
+@click.option("--url", default=None, help="New Zoom link or pasted invitation.")
+@click.option(
+    "--note",
+    "--title",
+    "note",
+    default=None,
+    help="Meeting title used for the file name and notifications.",
+)
+@click.option("--output-dir", default=None, type=click.Path(file_okay=False), help="Absolute folder for this meeting.")
+@click.option("--rrule", default=None, help="RFC 5545 rule, e.g. 'FREQ=WEEKLY;INTERVAL=2;BYDAY=WE'.")
+@click.option("--tz", "tz_name", default=None, help="IANA time zone for the recurrence, e.g. Europe/London.")
+def edit_meeting(
+    entry_id: str,
+    schedule_path: str,
+    start_at: str | None,
+    url: str | None,
+    note: str | None,
+    output_dir: str | None,
+    rrule: str | None,
+    tz_name: str | None,
+) -> None:
+    """Change one entry; only the flags you pass change. Same validation as the UI."""
+    changes = {
+        "start_at": start_at,
+        "url": url,
+        "note": note,
+        "output_dir": output_dir,
+        "rrule": rrule,
+        "tz": tz_name,
+    }
+    given = {key: value for key, value in changes.items() if value is not None}
+    if not given:
+        raise click.UsageError("nothing to change: pass at least one of --start/--url/--title/…")
+    try:
+        store = ScheduleStore(schedule_path)
+        updated = store.update(entry_id, **given)
+    except (ScheduleError, StoreError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if updated is None:
+        raise click.ClickException(f"no entry {entry_id!r} in {store.path}")
+    # An edit re-arms the entry, so say the new state rather than the old one.
+    console.print(
+        f"[green]updated[/] [cyan]{updated.id}[/]  {updated.start}  {updated.status}  {updated.url}"
+    )
+    if updated.rrule:
+        console.print(f"  rule: {updated.rrule}" + (f" ({updated.tz})" if updated.tz else ""))
+    if updated.output_dir:
+        console.print(f"  into: {updated.output_dir}")
+
+
 @cli.command("run")
 @click.option(
     "--schedule",
@@ -1641,6 +1765,7 @@ def run(
 
             log.info("recording entry %s (%s) into %s", entry.id, entry.start, output)
             schedule.mark(entry.id, STATUS_RUNNING)
+            started_mono = time.monotonic()
             result = _record_session_awake(
                 url=entry.url,
                 output_path=output,
@@ -1668,6 +1793,14 @@ def run(
                 notify_url=notify_url or schedule.setting("notify_url"),
                 steal_meeting=steal_meeting,
                 quality=quality,
+            )
+            _log_session(
+                schedule.path,
+                entry_id=entry.id,
+                meeting=entry.note or _recording_title("", entry.url),
+                scheduled=entry.start,
+                result=result,
+                seconds=int(time.monotonic() - started_mono),
             )
 
             status = STATUS_DONE if result.exit_code == EXIT_OK else STATUS_FAILED
@@ -1713,15 +1846,14 @@ def _pythonw() -> str:
     return str(windowless if windowless.is_file() else executable)
 
 
-def build_schtasks_args(
+def build_task_command(
     *,
-    name: str,
     schedule_path: str | Path,
     output_dir: str | Path,
     log_file: str | Path | None = None,
     python_exe: str | Path | None = None,
 ) -> list[str]:
-    """``schtasks /Create`` command that starts the resident runner at logon."""
+    """The argv a scheduled task runs: interpreter, script, and the resident runner's flags."""
     script = Path(__file__).resolve().with_name("main.py")
     command = [
         str(python_exe or _pythonw()),
@@ -1734,6 +1866,24 @@ def build_schtasks_args(
     ]
     if log_file:
         command += ["--log-file", str(Path(log_file).expanduser().resolve())]
+    return command
+
+
+def build_schtasks_args(
+    *,
+    name: str,
+    schedule_path: str | Path,
+    output_dir: str | Path,
+    log_file: str | Path | None = None,
+    python_exe: str | Path | None = None,
+) -> list[str]:
+    """``schtasks /Create`` command that starts the resident runner at logon."""
+    command = build_task_command(
+        schedule_path=schedule_path,
+        output_dir=output_dir,
+        log_file=log_file,
+        python_exe=python_exe,
+    )
     return [
         "schtasks",
         "/Create",
@@ -1747,6 +1897,60 @@ def build_schtasks_args(
         "/TR",
         subprocess.list2cmdline(command),
     ]
+
+
+def build_task_xml(
+    *,
+    schedule_path: str | Path,
+    output_dir: str | Path,
+    log_file: str | Path | None = None,
+    python_exe: str | Path | None = None,
+    restart_interval: str = "PT1M",
+    restart_count: int = 3,
+) -> str:
+    """Task Scheduler XML for the logon runner.
+
+    Needed because ``schtasks`` has no flag for ``RestartOnFailure`` (a crashed runner stays dead until the next
+    logon) and its default ``ExecutionTimeLimit`` is 72 hours (a resident runner would be killed at day 3);
+    ``PT0S`` means unlimited. ``MultipleInstancesPolicy=IgnoreNew`` plus the runner's own lock makes a double
+    start harmless.
+    """
+    command = build_task_command(
+        schedule_path=schedule_path,
+        output_dir=output_dir,
+        log_file=log_file,
+        python_exe=python_exe,
+    )
+    executable, *arguments = command
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+        "  <Triggers>\n"
+        "    <LogonTrigger>\n"
+        "      <Enabled>true</Enabled>\n"
+        "    </LogonTrigger>\n"
+        "  </Triggers>\n"
+        '  <Principals>\n    <Principal id="Author">\n'
+        "      <LogonType>InteractiveToken</LogonType>\n"
+        "      <RunLevel>LeastPrivilege</RunLevel>\n"
+        "    </Principal>\n  </Principals>\n"
+        "  <Settings>\n"
+        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+        "    <StartWhenAvailable>true</StartWhenAvailable>\n"
+        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+        f"    <RestartOnFailure>\n      <Interval>{restart_interval}</Interval>\n"
+        f"      <Count>{int(restart_count)}</Count>\n    </RestartOnFailure>\n"
+        "    <Enabled>true</Enabled>\n"
+        "  </Settings>\n"
+        '  <Actions Context="Author">\n    <Exec>\n'
+        f"      <Command>{xml_escape(executable)}</Command>\n"
+        f"      <Arguments>{xml_escape(subprocess.list2cmdline(arguments))}</Arguments>\n"
+        f"      <WorkingDirectory>{xml_escape(str(Path(__file__).resolve().parent))}</WorkingDirectory>\n"
+        "    </Exec>\n  </Actions>\n"
+        "</Task>\n"
+    )
 
 
 @cli.command("status")
@@ -1859,6 +2063,40 @@ def stop(schedule_path: str, wait: float) -> None:
     )
 
 
+@cli.command("runs")
+@click.option(
+    "--schedule",
+    "schedule_path",
+    default=DEFAULT_SCHEDULE,
+    show_default=True,
+    type=click.Path(dir_okay=False),
+)
+@click.option("--limit", default=10, show_default=True, type=click.IntRange(1, 1000))
+@click.option("--json", "as_json", is_flag=True, help="Print one JSON object per line.")
+def runs(schedule_path: str, limit: int, as_json: bool) -> None:
+    """Show recent session outcomes from logs/runs.jsonl (newest first)."""
+    records = read_runs(schedule_path, limit=limit)
+    if as_json:
+        for record in records:
+            click.echo(json.dumps(record, sort_keys=True))
+        return
+    if not records:
+        console.print("no runs recorded yet (logs/runs.jsonl)")
+        return
+    for record in records:
+        status = str(record.get("status") or "?")
+        elapsed = format_delta(float(record.get("seconds") or 0))
+        meeting = record.get("meeting") or record.get("entry") or "?"
+        line = f"{record.get('ts') or '?'}  {status:<7} {elapsed:>8}  {meeting}"
+        if record.get("detail"):
+            line += f"  ({record['detail']})"
+        console.print(line)
+        if record.get("path"):
+            console.print(f"    -> {record['path']}")
+        if record.get("report"):
+            console.print(f"    report: {record['report']}")
+
+
 @cli.command("install")
 @click.option("--name", default="ZoomRecorder", show_default=True, help="Task Scheduler task name.")
 @click.option(
@@ -1881,26 +2119,59 @@ def stop(schedule_path: str, wait: float) -> None:
     type=click.Path(dir_okay=False),
 )
 @click.option("--python", "python_exe", default=None, help="Python interpreter for the task.")
+@click.option(
+    "--restart-on-failure/--no-restart-on-failure",
+    "restart_on_failure",
+    default=False,
+    help="Register via Task XML so a crashed runner is restarted (1 min apart, 3 tries).",
+)
 def install(
     name: str,
     schedule_path: str,
     output_dir: str,
     log_file: str | None,
     python_exe: str | None,
+    restart_on_failure: bool,
 ) -> None:
     """Register the resident runner to start at logon (Windows Task Scheduler)."""
     if not is_windows():
         _fail(1, "Task Scheduler registration is Windows-only")
 
-    args = build_schtasks_args(
-        name=name,
-        schedule_path=schedule_path,
-        output_dir=output_dir,
-        log_file=log_file,
-        python_exe=python_exe,
-    )
-    log.info("running: %s", subprocess.list2cmdline(args))
-    completed = subprocess.run(args, capture_output=True, text=True)
+    if restart_on_failure:
+        # NamedTemporaryFile closes the handle; mkstemp would leak it and schtasks cannot read a locked file.
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".xml",
+            prefix="zoom-recorder-task-",
+            encoding="utf-16",
+            delete=False,
+        ) as handle:
+            handle.write(
+                build_task_xml(
+                    schedule_path=schedule_path,
+                    output_dir=output_dir,
+                    log_file=log_file,
+                    python_exe=python_exe,
+                )
+            )
+            xml_path = Path(handle.name)
+        try:
+            args = ["schtasks", "/Create", "/TN", name, "/XML", str(xml_path), "/F"]
+            log.info("running: %s", subprocess.list2cmdline(args))
+            completed = subprocess.run(args, capture_output=True, text=True)
+        finally:
+            with suppress(OSError):
+                xml_path.unlink()
+    else:
+        args = build_schtasks_args(
+            name=name,
+            schedule_path=schedule_path,
+            output_dir=output_dir,
+            log_file=log_file,
+            python_exe=python_exe,
+        )
+        log.info("running: %s", subprocess.list2cmdline(args))
+        completed = subprocess.run(args, capture_output=True, text=True)
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         _fail(1, f"schtasks failed ({completed.returncode}): {detail}")

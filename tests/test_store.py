@@ -18,12 +18,43 @@ from store import (
     RunnerLock,
     ScheduleStore,
     StoreError,
+    append_run,
     clear_stop,
     next_action,
+    read_runs,
     request_stop,
     split_entry_spec,
     stop_requested,
 )
+
+
+class RunLogTests(unittest.TestCase):
+    def test_each_run_is_one_json_line_beside_the_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            path = append_run(schedule, {"ts": "t1", "status": "done"})
+            append_run(schedule, {"ts": "t2", "status": "failed"})
+            self.assertEqual(path, (Path(tmp) / "logs" / "runs.jsonl").resolve())
+            lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[1])["status"], "failed")
+
+    def test_reading_returns_newest_first_and_honours_the_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            for index in range(5):
+                append_run(schedule, {"ts": f"t{index}"})
+            recent = read_runs(schedule, limit=2)
+        self.assertEqual([record["ts"] for record in recent], ["t4", "t3"])
+
+    def test_a_damaged_line_does_not_hide_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            path = store_module.runs_path(schedule)
+            path.parent.mkdir(parents=True)
+            path.write_text('{"ts": "t1"}\nnot json\n\n{"ts": "t2"}\n', encoding="utf-8")
+            records = read_runs(schedule)
+        self.assertEqual([record["ts"] for record in records], ["t2", "t1"])
 
 
 NOW = datetime(2026, 11, 9, 18, 0, 0)
@@ -57,14 +88,14 @@ class StorePersistenceTests(unittest.TestCase):
         added = store.add(
             url="https://zoom.us/j/81234567890",
             start_at="2026-11-09 18:30",
-            output_dir="./rec",
+            output_dir=str(self.path.parent / "rec"),
             note="weekly",
         )
 
         reloaded = self.fetch(added.id)
         self.assertEqual(reloaded.url, "https://zoom.us/j/81234567890")
         self.assertEqual(reloaded.start, "2026-11-09 18:30")
-        self.assertEqual(reloaded.output_dir, "./rec")
+        self.assertEqual(reloaded.output_dir, str(self.path.parent / "rec"))
         self.assertEqual(reloaded.note, "weekly")
         self.assertEqual(reloaded.status, STATUS_PENDING)
 
@@ -72,6 +103,22 @@ class StorePersistenceTests(unittest.TestCase):
         store = ScheduleStore(self.path)
         with self.assertRaises(ScheduleError):
             store.add(url="https://zoom.us/j/1", start_at="09.11.2026 18:30")
+
+    def test_a_relative_output_dir_is_rejected_at_save(self):
+        store = ScheduleStore(self.path)
+        with self.assertRaises(ScheduleError):
+            store.add(
+                url="https://zoom.us/j/1", start_at="2026-11-09 18:30", output_dir="./rec"
+            )
+
+    def test_an_output_dir_without_its_parent_is_rejected(self):
+        store = ScheduleStore(self.path)
+        with self.assertRaises(ScheduleError):
+            store.add(
+                url="https://zoom.us/j/1",
+                start_at="2026-11-09 18:30",
+                output_dir=str(self.path.parent / "missing" / "rec"),
+            )
 
     def test_remove(self):
         store = ScheduleStore(self.path)

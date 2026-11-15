@@ -88,6 +88,24 @@ class Entry:
         return cls(**{key: value for key, value in data.items() if key in known})
 
 
+def validated_output_dir(value: str | Path | None) -> str | None:
+    """A per-entry folder must be absolute with an existing parent.
+
+    The runner resolves it from its own working directory (the task sets one, but a CLI user's is whatever
+    directory they happened to be in), and the leaf is created when the meeting records — so a typo is caught at
+    save time instead of failing at 03:00 with exit 1.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        raise ScheduleError(f"output_dir must be an absolute path: {text!r}")
+    if not path.parent.is_dir():
+        raise ScheduleError(f"output_dir's parent folder does not exist: {path.parent}")
+    return str(path)
+
+
 class ScheduleStore:
     """JSON-backed list of scheduled meetings."""
 
@@ -210,7 +228,7 @@ class ScheduleStore:
             id=uuid.uuid4().hex[:8],
             url=canonical_url,
             start=start.strftime(START_FORMAT),
-            output_dir=output_dir,
+            output_dir=validated_output_dir(output_dir),
             note=note.strip(),
             email=clean_email,
             repeat=repeat or None,
@@ -279,7 +297,7 @@ class ScheduleStore:
         if changes.get("note") is not None:
             entry.note = str(changes["note"]).strip()
         if changes.get("output_dir") is not None:
-            entry.output_dir = str(changes["output_dir"]).strip() or None
+            entry.output_dir = validated_output_dir(changes["output_dir"])
         # An edit is a re-arm: a finished or missed entry becomes schedulable again.
         entry.status = STATUS_PENDING
         self.save()
@@ -400,6 +418,44 @@ def stop_requested(schedule_path: str | Path) -> bool:
 def clear_stop(schedule_path: str | Path) -> None:
     with suppress(OSError):
         stop_marker_path(schedule_path).unlink()
+
+
+def runs_path(schedule_path: str | Path) -> Path:
+    """Where session outcomes are appended: ``logs/runs.jsonl`` next to the schedule file."""
+    path = Path(schedule_path).expanduser().resolve()
+    return path.with_name("logs") / "runs.jsonl"
+
+
+def append_run(schedule_path: str | Path, record: dict[str, object]) -> Path:
+    """Append one session record as a JSON line.
+
+    Raises ``OSError``; callers log a warning instead of failing a recording over a log file.
+    """
+    target = runs_path(schedule_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    return target
+
+
+def read_runs(schedule_path: str | Path, limit: int = 20) -> list[dict[str, object]]:
+    """The most recent records, newest first. A damaged line is skipped, never fatal."""
+    target = runs_path(schedule_path)
+    if not target.exists():
+        return []
+    records: list[dict[str, object]] = []
+    for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    selected = records if limit <= 0 else records[-limit:]
+    return selected[::-1]
 
 
 class RunnerLock:
