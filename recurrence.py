@@ -12,7 +12,7 @@ and converts internally:
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.rrule import rrule, rrulestr
@@ -101,6 +101,31 @@ def occurrences(
     found: list[datetime] = []
     for moment in rule.xafter(anchor, count=count, inc=False):
         found.append(moment.astimezone().replace(tzinfo=None))
+    return found
+
+def occurrences_between(
+    spec: str,
+    start_local: str,
+    tz_name: str | None = None,
+    first_day: date | None = None,
+    last_day: date | None = None,
+    limit: int = 500,
+) -> list[datetime]:
+    """Every start in ``[first_day, last_day]`` (inclusive days), as naive machine-local datetimes.
+
+    The calendar needs a whole month at once, which ``occurrences(count=…)`` cannot express: a monthly rule would
+    need a count of 12 per year. Bounded by *limit* so a corrupt rule cannot spin forever.
+    """
+    rule = build(spec, start_local, tz_name)
+    tz = zone(tz_name)
+    after = datetime.combine(first_day, time.min) if first_day else datetime.now()
+    until = datetime.combine(last_day, time.max) if last_day else None
+    found: list[datetime] = []
+    for moment in rule.xafter(after.astimezone(tz), count=limit, inc=True):
+        local = moment.astimezone().replace(tzinfo=None)
+        if until is not None and local > until:
+            break
+        found.append(local)
     return found
 
 

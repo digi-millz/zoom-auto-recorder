@@ -39,8 +39,8 @@
            padding: 16px 22px; border-bottom: 1px solid var(--border); background: var(--surface); }
   h1 { font-size: 17px; margin: 0 8px 0 0; font-weight: 650; }
   h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
-  main { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px;
-         padding: 18px 22px 0; max-width: 1180px; }
+  main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px;
+         padding: 18px 22px 30px; }
   @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
   .card { background: var(--surface); border: 1px solid var(--border);
           border-radius: 10px; padding: 16px; }
@@ -48,6 +48,8 @@
   .chip { border: 1px solid var(--border); border-radius: 999px;
           padding: 3px 10px; font-size: 12px; color: var(--muted); }
   .chip b { color: var(--fg); font-weight: 600; }
+  .chip.bad { border-color: var(--err); color: var(--err); }
+  .chip.bad b { color: var(--err); }
   button { font: inherit; border: 1px solid var(--border); background: var(--surface);
            color: var(--fg); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
   button:hover { border-color: var(--accent); }
@@ -89,7 +91,7 @@
         border: 1px solid var(--border); border-radius: 8px; padding: 10px;
         font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
   .hint { color: var(--muted); font-size: 12px; margin: 12px 0 0; }
-  .entries { margin: 18px 22px 30px; max-width: 1180px; }
+  .entries { min-width: 0; overflow-x: auto; }
   .entries-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
   .teach-row { display: flex; align-items: center; gap: 12px; padding: 10px 0;
                border-top: 1px solid var(--border); flex-wrap: wrap; }
@@ -103,14 +105,24 @@
   .entries-head h2 { margin: 0; }
   .entries-head label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border);
-           font-size: 13px; vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border);
+           font-size: 13px; vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; position: sticky; top: 0;
+       background: var(--surface); }
+  tbody tr:hover { background: var(--bg); }
+  tbody tr:last-child td { border-bottom: none; }
   td.when { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  td.link { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.when small { display: block; max-width: 20ch; overflow: hidden; text-overflow: ellipsis;
+                  color: var(--muted); font-size: 11px; }
+  td.note { min-width: 12ch; }
+  td.link { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.link a { color: var(--accent); text-decoration: none; }
-  td.file { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  td.link a:hover { text-decoration: underline; }
+  td.file { max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             color: var(--muted); font-size: 12px; }
+  td.actions { white-space: nowrap; text-align: right; }
+  td.actions button { padding: 4px 10px; font-size: 12px; }
+  td.actions button + button { margin-left: 6px; }
   .pill { border-radius: 999px; padding: 1px 9px; font-size: 11px; border: 1px solid; }
   .pill.pending { color: var(--muted); }
   .pill.running { color: var(--run); border-color: var(--run); }
@@ -243,6 +255,20 @@
       Zoom meeting window closes.</p>
   </section>
 
+  <section class="card wide entries">
+    <div class="entries-head">
+      <h2>Schedule</h2>
+      <label><input type="checkbox" id="show-all"> show finished</label>
+    </div>
+    <table>
+      <thead>
+        <tr><th>When</th><th>Status</th><th>Note</th><th>Link</th><th>File</th><th></th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>Nothing scheduled.</div>
+  </section>
+
   <section class="card wide" id="settings-card">
     <h2>Settings</h2>
     <form id="out-form">
@@ -288,20 +314,6 @@
     <pre id="log-pre">run the runner to see activity here.</pre>
   </section>
 </main>
-
-<section class="card entries">
-  <div class="entries-head">
-    <h2>Schedule</h2>
-    <label><input type="checkbox" id="show-all"> show finished</label>
-  </div>
-  <table>
-    <thead>
-      <tr><th>When</th><th>Status</th><th>Note</th><th>Link</th><th>File</th><th></th></tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <div class="empty" id="empty" hidden>Nothing scheduled.</div>
-</section>
 
 <div id="toast"></div>
 
@@ -359,7 +371,12 @@ function updateEta() {
 function renderChips() {
   const pid = snapshot.runner_pid;
   const running = (snapshot.entries || []).find((entry) => entry.status === "running");
-  $("chip-runner").innerHTML = `runner: <b>${pid ? "pid " + pid : "stopped"}</b>`;
+  const needed = !!snapshot.runner_needed;
+  $("chip-runner").classList.toggle("bad", needed);
+  $("chip-runner").title = needed
+    ? "Nothing is running to record the next event. Press Start runner, or register the watchdog: main.py install --restart-on-failure --watchdog"
+    : "";
+  $("chip-runner").innerHTML = `runner: <b>${pid ? "pid " + pid : needed ? "needed" : "stopped"}</b>`;
   $("chip-obs").innerHTML = `OBS: <b>${snapshot.obs_reachable ? "reachable" : "unreachable"}</b>`;
   $("chip-next").innerHTML = snapshot.next
     ? `next: <b>${snapshot.next.start}</b>`
@@ -370,16 +387,71 @@ function renderChips() {
   updateEta();
 }
 
-function renderCalendar() {
-  const counts = new Map();
-  for (const entry of snapshot.entries) {
-    const day = (entry.start || "").slice(0, 10);
-    if (day) counts.set(day, (counts.get(day) || 0) + 1);
-  }
+// Occurrences per "YYYY-MM", from the server (the RRULE maths lives in recurrence.py, not here). Cleared whenever
+// the schedule changes, so a new event does not wait for a reload.
+const occCache = new Map();
 
+// The cache key carries a digest of the entries, so adding/editing/removing an event invalidates it without
+// refetching every month on the 5-second poll.
+function scheduleDigest() {
+  return (snapshot.entries || [])
+    .map((entry) => `${entry.id}|${entry.start}|${entry.rrule || ""}|${entry.repeat || ""}|${entry.tz || ""}`)
+    .join(";");
+}
+
+async function occurrencesFor(month) {
+  const key = `${scheduleDigest()}::${month}`;
+  if (!occCache.has(key)) {
+    const data = await api(`/api/occurrences?month=${month}`);
+    const byDay = new Map();
+    for (const item of data.occurrences || []) {
+      const day = (item.start || "").slice(0, 10);
+      if (!day) continue;
+      if (!byDay.has(day)) byDay.set(day, []);
+      byDay.get(day).push(item);
+    }
+    if (occCache.size > 24) occCache.clear();
+    occCache.set(key, byDay);
+  }
+  return occCache.get(key);
+}
+
+const monthKey = (day) =>
+  `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}`;
+
+async function renderCalendar() {
   const grid = $("cal-grid");
   grid.textContent = "";
   $("cal-title").textContent = view.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  const first = new Date(view.getFullYear(), view.getMonth(), 1);
+  const start = new Date(first);
+  start.setDate(1 - first.getDay());
+
+  // The 42-cell grid can straddle three months; every one of them has to be asked for.
+  const months = new Set();
+  for (let i = 0; i < 42; i++) {
+    const day = new Date(start);
+    day.setDate(start.getDate() + i);
+    months.add(monthKey(day));
+  }
+  const entriesById = new Map((snapshot.entries || []).map((entry) => [entry.id, entry]));
+  const byDay = new Map();
+  try {
+    for (const byDayOfMonth of await Promise.all([...months].map(occurrencesFor))) {
+      for (const [day, items] of byDayOfMonth) byDay.set(day, items);
+    }
+  } catch (err) {
+    // A server without /api/occurrences (an older process on the port) must still draw a calendar: fall back to
+    // each entry's own start, which is what the grid showed before occurrences existed. Never an empty grid.
+    for (const entry of snapshot.entries || []) {
+      const day = (entry.start || "").slice(0, 10);
+      if (!day) continue;
+      if (!byDay.has(day)) byDay.set(day, []);
+      byDay.get(day).push({ id: entry.id, start: entry.start });
+    }
+    toast(`calendar: ${err.message} — restart the UI process to pick up the occurrences endpoint`);
+  }
 
   for (const label of ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]) {
     const node = document.createElement("div");
@@ -388,11 +460,7 @@ function renderCalendar() {
     grid.appendChild(node);
   }
 
-  const first = new Date(view.getFullYear(), view.getMonth(), 1);
-  const start = new Date(first);
-  start.setDate(1 - first.getDay());
   const today = ymd(new Date());
-
   for (let i = 0; i < 42; i++) {
     const day = new Date(start);
     day.setDate(start.getDate() + i);
@@ -409,16 +477,35 @@ function renderCalendar() {
     num.textContent = String(day.getDate());
     cell.appendChild(num);
 
-    if (counts.get(key)) {
+    const dayItems = (byDay.get(key) || [])
+      .map((item) => ({ item, entry: entriesById.get(item.id) }))
+      .filter((pair) => pair.entry);
+    if (dayItems.length) {
       const badge = document.createElement("span");
       badge.className = "badge";
-      badge.textContent = `${counts.get(key)} event${counts.get(key) > 1 ? "s" : ""}`;
+      badge.textContent = dayItems.length === 1
+        ? (dayItems[0].item.start || "").slice(11)
+        : `${dayItems.length} events`;
       cell.appendChild(badge);
+      cell.title = dayItems
+        .map(({ item, entry }) => `${(item.start || "").slice(11)} ${entry.note || entry.url}`)
+        .join("\n");
     }
 
     cell.addEventListener("click", () => {
       $("f-date").value = key;
       if (!$("f-time").value) $("f-time").value = "10:00";
+      if (dayItems.length === 1) {
+        // One event on this day: open it. A repeat opens its series, whose first start is what the form shows.
+        startEdit(dayItems[0].entry);
+        $("add-form").scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      if (dayItems.length > 1) {
+        $("rows").scrollIntoView({ behavior: "smooth", block: "center" });
+        toast(`${dayItems.length} events on ${key} — pick one below to edit or see its file`);
+        return;
+      }
       $("f-url").focus();
     });
     grid.appendChild(cell);
@@ -451,11 +538,11 @@ function renderEntries() {
     const when = document.createElement("td");
     when.className = "when";
     when.textContent = entry.start;
-    const repeatText = entry.rrule || entry.repeat || "";
-    if (repeatText) {
+    const repeatSpec = entry.rrule || LEGACY_RULES[(entry.repeat || "").toLowerCase()] || "";
+    if (entry.rrule || entry.repeat) {
       const badge = document.createElement("small");
-      badge.textContent = ` ↻ ${repeatText}`;
-      badge.title = entry.tz ? `${repeatText} (${entry.tz})` : repeatText;
+      badge.textContent = `↻ ${describeRule(repeatSpec) || entry.repeat || "repeats"}`;
+      badge.title = entry.tz ? `${repeatSpec} (${entry.tz})` : repeatSpec;
       when.appendChild(badge);
     }
 
@@ -463,6 +550,7 @@ function renderEntries() {
     status.appendChild(statusPill(entry.status));
 
     const note = document.createElement("td");
+    note.className = "note";
     note.textContent = entry.note || "";
 
     const link = document.createElement("td");
@@ -481,6 +569,7 @@ function renderEntries() {
     file.title = entry.last_path || "";
 
     const actions = document.createElement("td");
+    actions.className = "actions";
     const edit = document.createElement("button");
     edit.textContent = "Edit";
     edit.addEventListener("click", () => startEdit(entry));
@@ -607,7 +696,10 @@ function startEdit(entry) {
   $("f-folder").value = entry.output_dir || "";
   $("f-tz").value = entry.tz || "";
   $("f-mic").checked = !!entry.mic;
-  const parsed = parseRule(entry.rrule || "");
+  // Old schedule files carry `repeat` instead of an RRULE (recurrence.LEGACY_RULES); without this the form opened
+  // as "custom" with an empty rule box and Save silently dropped the repeat.
+  const rule = entry.rrule || LEGACY_RULES[(entry.repeat || "").toLowerCase()] || "";
+  const parsed = parseRule(rule);
   document.querySelectorAll(".wd").forEach((box) => {
     box.checked = !!(parsed && parsed.days && parsed.days.includes(box.value));
   });
@@ -616,7 +708,7 @@ function startEdit(entry) {
     $("f-end").value = parsed.end;
   } else {
     $("f-freq").value = "custom";
-    $("f-rrule").value = entry.rrule || "";
+    $("f-rrule").value = rule;
     $("f-end").value = "never";
   }
   $("f-until").value = "";
@@ -663,6 +755,34 @@ function buildRule() {
     parts.push(`COUNT=${$("f-count").value}`);
   }
   return parts.join(";");
+}
+
+// Mirrors recurrence.LEGACY_RULES: `repeat` is the pre-RRULE field, still present in old schedule files.
+const LEGACY_RULES = {
+  weekly: "FREQ=WEEKLY",
+  weekdays: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+};
+
+const DAY_NAMES = { SU: "Sun", MO: "Mon", TU: "Tue", WE: "Wed", TH: "Thu", FR: "Fri", SA: "Sat" };
+
+// A rule the table can show at a glance. The raw RRULE stays in the tooltip, so nothing is hidden.
+function describeRule(spec) {
+  if (!spec) return "";
+  const up = spec.toUpperCase();
+  const freq = (/FREQ=(DAILY|WEEKLY|MONTHLY)/.exec(up) || [])[1];
+  if (!freq) return spec;
+  const interval = Number((/INTERVAL=(\d+)/.exec(up) || [0, "1"])[1]);
+  const parts = [];
+  if (freq === "WEEKLY" && interval === 2) parts.push("every 2 weeks");
+  else if (interval > 1) parts.push(`every ${interval} ${freq.toLowerCase().replace(/ly$/, "s")}`);
+  else parts.push({ DAILY: "daily", WEEKLY: "weekly", MONTHLY: "monthly" }[freq]);
+  const days = (/BYDAY=([A-Z,]+)/.exec(up) || [])[1];
+  if (days) parts.push(days.split(",").map((day) => DAY_NAMES[day] || day).join(" "));
+  const count = (/COUNT=(\d+)/.exec(up) || [])[1];
+  if (count) parts.push(`${count} times`);
+  const until = (/UNTIL=(\d{8})/.exec(up) || [])[1];
+  if (until) parts.push(`until ${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}`);
+  return parts.join(" · ");
 }
 
 // Reverse of buildRule() for the shapes it can emit; anything else becomes "custom".

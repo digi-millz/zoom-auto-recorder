@@ -35,6 +35,11 @@ POLL_INTERVAL = 0.7
 MIN_AREA_SIDE = 40
 
 
+def _squash(text: str) -> str:
+    """Drop whitespace: OCR splits an address into ``myermillen gmail com`` and would fail a substring test."""
+    return "".join(text.split())
+
+
 @dataclass
 class Stats:
     scans: int = 0
@@ -238,17 +243,20 @@ class DialogWatcher:
         self._shot(window, "before-email", capture.image)
         log.info("typing the prejoin email into %s at (%d, %d)", window.cls, x, y)
         self.click(x, y)
-        self.sleep(0.25)
+        # CEF needs a moment to move focus into the field; typing 250 ms after the click landed in nothing.
+        self.sleep(0.5)
         self.type_text(self.email)
         self._typed[window.hwnd] = self._typed.get(window.hwnd, 0) + 1
-        self.sleep(0.35)
+        self.sleep(0.6)
 
         after = self.grab(window.hwnd)
         landed = False
         if after is not None:
             after_text = " ".join(word.text for word in self.read_words(after.image)).lower()
             self._shot_hwnd(window.hwnd, "after-email", after.image)
-            landed = self.email.lower() in after_text or after_text != lowered
+            # The address itself must be readable in the field. "the text changed somehow" was true when the click
+            # merely moved focus, which made a still-empty field look filled and the Join click a no-op.
+            landed = _squash(self.email).lower() in _squash(after_text)
         if landed:
             self.stats.typed += 1
             log.info("email entry confirmed in %s; the next poll can press Join", window.cls)

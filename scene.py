@@ -147,6 +147,13 @@ def prepare(
         ",".join(muted) or "none",
         "on" if mic_on else "off",
     )
+    # The scene existing is not the same as OBS outputting it: whatever scene was live (the user's own, with its
+    # own capture) is what gets recorded. Measured on this machine — the same source read luma 0 with another
+    # scene live and 255 after the switch, so every recording before this line was of somebody else's scene.
+    current = _data(call(requests.GetSceneList())).get("currentProgramSceneName")
+    if current != scene:
+        _data(call(requests.SetCurrentProgramScene(sceneName=scene)))
+        log.info("switched the OBS program scene to %r (was %r)", scene, current)
     return {
         "scene": scene,
         "window_source": window_source,

@@ -335,5 +335,6 @@ class VideoSizeTests(unittest.TestCase):
 
         self.assertIsNone(self._controller(Broken()).video_size())
 
+
 if __name__ == "__main__":
     unittest.main()

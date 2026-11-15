@@ -7,7 +7,7 @@ running the recorder may be in a different zone entirely.
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 
 import recurrence
 from scheduler import ScheduleError
@@ -97,6 +97,38 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("Weekly", text)
         self.assertIn("every 2", text)
         self.assertIn("Europe/London", text)
+
+
+class OccurrencesBetweenTests(unittest.TestCase):
+    """The calendar asks for a month and must get every occurrence in it, including both edges."""
+
+    def test_weekly_series_fills_the_window(self) -> None:
+        days = recurrence.occurrences_between(
+            "FREQ=WEEKLY;BYDAY=MO,WE",
+            "2026-11-02 10:00",
+            None,
+            first_day=date(2026, 11, 1),
+            last_day=date(2026, 11, 30),
+        )
+        self.assertEqual(
+            [moment.strftime("%Y-%m-%d %H:%M") for moment in days[:4]],
+            ["2026-11-02 10:00", "2026-11-04 10:00", "2026-11-09 10:00", "2026-11-11 10:00"],
+        )
+        self.assertTrue(all(moment.month == 11 for moment in days))
+        self.assertEqual(len(days), 9)  # Nov 2..30, Mon+Wed
+
+    def test_a_month_without_an_occurrence_is_empty(self) -> None:
+        self.assertEqual(
+            recurrence.occurrences_between(
+                "FREQ=WEEKLY;UNTIL=20261110T000000Z",
+                "2026-11-02 10:00",
+                "UTC",
+                first_day=date(2026, 12, 1),
+                last_day=date(2026, 12, 31),
+            ),
+            [],
+        )
+
 
 
 if __name__ == "__main__":

@@ -368,5 +368,29 @@ class WebUiTests(unittest.TestCase):
         self.assertEqual(code, 404)
 
 
+
+    def test_occurrences_fill_every_repeat_day_of_the_month(self) -> None:
+        _status, body = self.request(
+            "/api/entries",
+            method="POST",
+            payload={
+                "when": "2026-11-02 10:00",
+                "url": "https://us06web.zoom.us/j/85091120436",
+                "note": "standup",
+                "rrule": "FREQ=WEEKLY;BYDAY=MO,WE",
+            },
+        )
+        entry = json.loads(body)["entry"]
+
+        status, body = self.request("/api/occurrences?month=2026-11")
+        days = [item["start"][:10] for item in json.loads(body)["occurrences"]]
+        self.assertEqual(status, 200)
+        self.assertEqual(days[:3], ["2026-11-02", "2026-11-04", "2026-11-09"])
+        self.assertEqual(len(days), 9)
+        self.assertEqual(set(item["id"] for item in json.loads(body)["occurrences"]), {entry["id"]})
+
+        code, _body = self.request_error("/api/occurrences?month=November")
+        self.assertEqual(code, 400)
+
 if __name__ == "__main__":
     unittest.main()

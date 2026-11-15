@@ -5,12 +5,24 @@ the road.
 
 ## Environment
 
-- Windows only. Python **3.13** at `E:\Programs\Python\Python313`.
+- Windows only. Python **3.13**, anywhere on the machine — the repo names no interpreter path. `py -3.13` is
+  the per-machine launcher that finds it.
 - Bare `python` on PATH is the Microsoft Store stub — always use the venv:
   - `.venv\Scripts\python.exe`
   - `.venv\Scripts\python.exe -m unittest discover -s tests -t .`
-- Create/refresh: `py -m venv .venv && .venv\Scripts\python.exe -m pip install -r requirements.txt`
+- Create/refresh on any machine: `py -3.13 -m venv .venv && .venv\Scripts\python.exe -m pip install -r requirements.txt`
+- Everything else is relative: `.venv\` (gitignored) and the default paths `./schedule.json` / `./recordings`
+  (`cli.DEFAULT_SCHEDULE`, `cli.DEFAULT_OUTPUT`) resolve against the working directory, so run commands from the
+  repo root and the same checkout works on every machine.
 - OBS Studio 28+ must be installed with **Tools → WebSocket Server Settings** enabled (port 4455).
+- `requirements.txt` also carries the OCR ladder (`winrt-*`, Windows OCR). Without it the watcher reads **nothing**
+  and every join stalls at Zoom's "Enter your email and name" prompt while the log repeats
+  `OCR failed: No module named 'winrt'`. After a fresh venv, `.venv\Scripts\python.exe -c "import ocr; print(ocr.available())"`
+  must print `True`.
+- **Machine-specific facts belong in `MACHINE.md`, never in a tracked doc.** Interpreter path, GPU, monitors, DPI,
+  OBS/Zoom install paths, the recording folder, the zoom email, what Task Scheduler has registered — one checkout per
+  machine, so anything true of *this* box and false of another goes there (it is gitignored). Tracked docs state
+  requirements and behaviour; measured evidence is dated in `docs/spikes.md` and says which machine it came from.
 
 ## Commands
 
@@ -69,6 +81,7 @@ the road.
 | `notify.py` | opt-in webhook (done/failed/needs_attention/missed), never blocks a recording |
 | `invite.py` | parse a pasted invitation (link, spaced meeting ID, passcode) and compare meeting identity |
 | `defaults.py` | values shared by CLI, UI and runner (the UI's default zone) |
+| `zoom_account.py` | reads the Zoom email from the client's own config (never in source) |
 | `ics.py` | `.ics` import |
 | `dialogs.py` | pure rule matching: OCR words → the click to make (no Win32) |
 | `watcher.py` | session loop: capture → read → decide → click → verify → alert |
@@ -80,6 +93,7 @@ the road.
 | `teach.py` | teach mode: unmatched-dialog screenshots → validated `rules.json` rule (pure) |
 | `rules.json` | dialog labels and limits (data, not code) |
 | `docs/` | `spikes.md` (live-meeting evidence), `live-acceptance.md` (the checks that need a meeting) |
+| `MACHINE.md` | this checkout's facts — interpreter path, GPU, monitors, install paths, recording folder (gitignored) |
 | `tests/` | unittest (no Zoom/OBS required) |
 
 ## Workflow

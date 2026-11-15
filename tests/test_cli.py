@@ -170,6 +170,31 @@ class SchtasksCommandTests(unittest.TestCase):
         )
         self.assertIn("--drain", args[args.index("/TR") + 1])
 
+    def test_watchdog_runs_drain_on_a_schedule_inside_max_late(self):
+        args = cli.build_watchdog_args(
+            name="ZoomRecorder",
+            schedule_path="schedule.json",
+            output_dir="recordings",
+            python_exe="pythonw.exe",
+            minutes=5,
+        )
+
+        self.assertEqual(args[args.index("/SC") + 1], "MINUTE")
+        self.assertEqual(args[args.index("/MO") + 1], "5")
+        self.assertEqual(args[args.index("/TN") + 1], "ZoomRecorder-watch")
+        command = args[args.index("/TR") + 1]
+        self.assertIn(" run ", f" {command} ")
+        self.assertIn("--drain", command)
+
+    def test_watchdog_refuses_an_interval_it_could_not_catch(self):
+        with self.assertRaises(ValueError):
+            cli.build_watchdog_args(
+                name="ZoomRecorder",
+                schedule_path="schedule.json",
+                output_dir="recordings",
+                minutes=cli.WATCHDOG_MAX_MINUTES + 1,
+            )
+
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 
@@ -415,6 +440,34 @@ class RunLogCommandTests(unittest.TestCase):
         self.assertEqual(report_file.parent.name, "reports")
         self.assertIn("Weekly sync", page)
         self.assertIn("data:image/png;base64,", page)
+
+    def test_a_session_without_screenshots_still_writes_a_report(self) -> None:
+        # The shots folder only exists when a dialog was captured; a clean join has none and must not log an error.
+        with tempfile.TemporaryDirectory() as tmp:
+            schedule = Path(tmp) / "schedule.json"
+            missing = Path(tmp) / "_shots" / "20261115-135619"
+            cli._log_session(
+                schedule,
+                entry_id="abc",
+                meeting="Weekly sync",
+                scheduled="2026-11-14 10:00",
+                result=cli.SessionResult(cli.EXIT_OK, Path("E:/rec/x.mp4"), False, missing),
+                seconds=12,
+            )
+            record = cli.read_runs(schedule)[0]
+            page = Path(record["report"]).read_text(encoding="utf-8")
+        self.assertIn("Weekly sync", page)
+        self.assertNotIn("data:image/png;base64,", page)
+
+
+class ObsPasswordTests(unittest.TestCase):
+    """A secret set as an environment value arrives with a trailing CR on Windows; OBS rejects it silently."""
+
+    def test_environment_password_loses_its_line_ending(self) -> None:
+        self.assertEqual(cli._obs_password("Fd13WlkZ2f4y7wlc\r\n"), "Fd13WlkZ2f4y7wlc")
+        self.assertEqual(cli._obs_password("Fd13WlkZ2f4y7wlc\n"), "Fd13WlkZ2f4y7wlc")
+
+
 
 if __name__ == "__main__":
     unittest.main()

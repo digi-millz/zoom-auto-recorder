@@ -5,8 +5,25 @@ click>=8.1,<9
 rich>=13,<15
 psutil>=5.9,<8
 
+# recurrence.py: rrule evaluation for repeating meetings. Imported by store.py,
+# so it is needed by every command, not just the recurrence maths.
+python-dateutil>=2.8,<3
+
+# dialogs/ocr/win_capture: OCR boxes, black-frame checks and screenshot crops.
+pillow>=10,<12
+
 # obs-websocket-py 1.0 is the FIRST AND ONLY release that speaks the
 # obs-websocket v5 protocol shipped with OBS 28+. 0.5.x is v4-only and fails
 # with KeyError: 'status' or "Your request type is not valid".
 # It depends on websocket-client, which pip resolves automatically.
 obs-websocket-py==1.0
+
+# OCR ladder, primary rung (PLAN §P1): Windows.Media.Ocr through pywinrt. Without it the watcher cannot read a
+# single dialog label, so every join stalls at "Enter your email and name" and nothing is ever recorded — the
+# failures look like a stuck meeting, not a missing package. Fallbacks are winsdk, then pytesseract.
+winrt-runtime
+winrt-Windows.Media.Ocr
+winrt-Windows.Graphics.Imaging
+winrt-Windows.Storage
+winrt-Windows.Globalization
+winrt-Windows.Foundation

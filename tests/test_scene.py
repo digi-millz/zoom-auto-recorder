@@ -25,13 +25,22 @@ class FakeOBS:
         self.audio_inputs = set(audio_inputs)
         self.muted: dict[str, bool] = {}
         self.enabled: dict[tuple[str, int], bool] = {}
+        self.live_scene: str | None = None
 
     def __call__(self, request):
         name = type(request).__name__
         payload = request.data()
         self.calls.append((name, payload))
         if name == "GetSceneList":
-            return FakeResponse({"scenes": [{"sceneName": s} for s in self.scenes]})
+            return FakeResponse(
+                {
+                    "scenes": [{"sceneName": s} for s in self.scenes],
+                    "currentProgramSceneName": self.live_scene,
+                }
+            )
+        if name == "SetCurrentProgramScene":
+            self.live_scene = payload["sceneName"]
+            return FakeResponse()
         if name == "CreateScene":
             self.scenes.append(payload["sceneName"])
             self.items.setdefault(payload["sceneName"], [])
@@ -135,6 +144,22 @@ class PrepareTests(unittest.TestCase):
         self.assertNotIn("CreateInput", names)
         self.assertNotIn("CreateSceneItem", names)
         self.assertEqual(names.count("SetInputSettings"), 2)
+
+    def test_prepare_makes_its_own_scene_the_live_one(self) -> None:
+        # OBS records the live scene, not the scene this app built. With the user's scene live, the recording was
+        # the user's capture (black on this machine: luma 0 with it live, 255 for ours).
+        obs = FakeOBS()
+        obs.scenes.append("Zoom Meet")
+        obs.live_scene = "Zoom Meet"
+        scene.prepare(obs, WINDOW)
+        self.assertEqual(obs.live_scene, scene.SCENE_NAME)
+
+    def test_an_already_live_scene_is_not_switched_again(self) -> None:
+        obs = FakeOBS()
+        obs.live_scene = scene.SCENE_NAME
+        obs.scenes.append(scene.SCENE_NAME)
+        scene.prepare(obs, WINDOW)
+        self.assertNotIn("SetCurrentProgramScene", obs.names())
 
     def test_title_change_updates_the_capture_target(self) -> None:
         obs = FakeOBS()

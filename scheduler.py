@@ -84,6 +84,25 @@ def seconds_until(target: datetime, now: datetime | None = None) -> float:
     """Seconds from *now* (default: wall clock) until *target*; negative if past."""
     return (target - (now or datetime.now())).total_seconds()
 
+RUNNER_LEAD_SECONDS = 600.0
+
+
+def runner_needed(
+    start_at: datetime,
+    now: datetime,
+    runner_pid: int | None,
+    lead: float = RUNNER_LEAD_SECONDS,
+) -> bool:
+    """True when a pending start depends on a runner nobody has started.
+
+    The runner is the only thing that turns a due entry into a recording, so ``pending`` + no live runner + a start
+    inside *lead* (or already past) is a meeting that will silently not be recorded. Pure, so `status` and the UI
+    answer this the same way.
+    """
+    if runner_pid is not None:
+        return False
+    return (start_at - now).total_seconds() <= lead
+
 
 def format_delta(seconds: float) -> str:
     """Render a duration as ``HH:MM:SS``, prefixed with ``Nd`` past 24 hours.

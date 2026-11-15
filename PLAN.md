@@ -16,15 +16,18 @@ Base: `digi-millz/zoom-auto-recorder` @ `59ed3f1` (cloned here). Python 3.13, Cl
 
 ## 1. Where we actually stand
 
-| Fact | Evidence |
+Machine-specific facts (interpreter path, GPUs, monitors, OBS/Zoom install paths, recording folder, what is
+registered on Task Scheduler) do **not** belong in this repo — the checkout is used on several machines. They live
+in `MACHINE.md`, which is gitignored and replaced per machine. What is tracked is only what the software requires:
+
+| Contract (true on any machine) | How it is checked |
 | --- | --- |
-| Repo cloned, `main` @ `59ed3f1`, single commit, **no LICENSE** | `git log`; no `LICENSE*` → private use only |
-| Python 3.13.2 real, at `E:\Programs\Python\Python313` | bare `python` is the Store stub → use `py` or `.venv` |
-| Deps installed in `.venv`; **85/85 tests pass** | `.venv\Scripts\python -m unittest discover -s tests -t .` |
-| Zoom desktop installed per-user | `%APPDATA%\Zoom\bin\Zoom.exe` |
-| OBS **not installed** | no `%APPDATA%\obs-studio`, no Program Files entry |
-| ffmpeg 9.0.2 on PATH; GTX 1060 (NVENC) + UHD 630 | `winget`-installed Gyan build; `nvidia-smi` |
-| Display 96 DPI / 100 %; Win 11 26300 | click math is 1:1 today, code must not assume it |
+| Repo upstream: `digi-millz/zoom-auto-recorder` @ `59ed3f1`, single commit, **no LICENSE** → private use only | `git log`; no `LICENSE*` |
+| Python **3.13**, wherever it is installed — no interpreter path is recorded | `py -3.13 -m venv .venv`; bare `python` is the Microsoft Store stub |
+| `requirements.txt` installs everything the app imports, OCR ladder included | `pip install -r requirements.txt`; `python -c "import ocr; print(ocr.available())"` → `True` |
+| Suite is green on a clean venv (**307 tests** at this writing) | `.venv\Scripts\python -m unittest discover -s tests -t .` |
+| OBS Studio 28+ with the WebSocket server on 4455, Zoom desktop signed in, ffmpeg on `PATH` | `main.py status`; `main.py record --url … --dry-run` → `preflight OK` |
+| Nothing assumes a DPI, a GPU, a monitor count or a drive letter | coordinates come from capture origins; paths are relative (`AGENTS.md`) |
 
 ### What the base already solves
 

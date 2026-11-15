@@ -2,7 +2,7 @@
 
 Remaining work. Everything else — scheduling, joining, dialog handling, recording, crash resume, notifications,
 recurrence/tz, calendar sync, run history, HTML reports, disk/lock/black guards — is implemented and covered by
-`python -m unittest discover -s tests -t .` (294 tests). These items are open because they need something this
+`python -m unittest discover -s tests -t .` (307 tests). These items are open because they need something this
 machine cannot provide: a live meeting, your unlocked session, or Task Scheduler rights.
 
 ## Blocked on a live session
@@ -11,12 +11,16 @@ machine cannot provide: a live meeting, your unlocked session, or Task Scheduler
       read back `RestartInterval=PT1M`, `RestartCount=3`, `ExecutionTimeLimit=PT0S`,
       `MultipleInstances=2 (IgnoreNew)`, `LogonType=3 (InteractiveToken)`, `RunLevel=0`, and the action
       (`pythonw.exe main.py run … --drain`, working dir = repo). What is untested is *registration*: `schtasks
-      /Create` is denied in the agent shell for any task. Run `python main.py install --restart-on-failure` from
-      a normal terminal, then `schtasks /Query /TN ZoomRecorder /XML`.
+      /Create` is denied in the agent shell for any task. Run `python main.py install --restart-on-failure --watchdog`
+      from a normal terminal, then `schtasks /Query /TN ZoomRecorder /XML` (and `ZoomRecorder-watch`).
 - [ ] **P4: 5-minute recording acceptance** — record a real meeting, then `python main.py verify "<file>"
       --expected-minutes 5`: it checks one video stream (Zoom window only), audio present, and duration. The
       *picture* half still needs eyes: no desktop, no notifications; audio must be Zoom only (no system sounds,
       no mic) — ears.
+- [ ] **P4: stop when the meeting window closes** — *process-exit half verified 2026-11-15*: Zoom killed mid-recording
+      → `Zoom process exited` → recording stopped, remuxed, `verify` PASS, frame luma 255. Still unproven: the window
+      disappears while `Zoom.exe` stays resident (`close_grace`, 5 s) — needs a meeting that ends normally rather
+      than a kill.
 - [ ] **P4: OBS killed while recording** — *file half verified 2026-11-14*: a real OBS 33.0.1 recording force-killed
       mid-flight leaves a playable mkv (`ffprobe`: h264 1920×1080, aac, 5.733 s, 4.3 MB). Still needs a meeting for
       the other half: the next start must resume as part 2.
@@ -51,6 +55,11 @@ machine cannot provide: a live meeting, your unlocked session, or Task Scheduler
 - [x] Teach mode card in the UI (`teach.py`, `/api/shots`, `/api/rules`)
 - [x] Per-event microphone (`scene.ensure_microphone`, verified against OBS 33.0.1: created enabled, disabled
       without deletion)
+- [x] `install --watchdog` (periodic `run --drain`), plus `runner_needed` in `status`/`--json` and a red runner chip
+      in the UI when a pending start has no runner
+- [x] Repeats badged on **every** occurrence in the UI calendar (`/api/occurrences`, `recurrence.occurrences_between`)
+- [x] OCR ladder pinned in `requirements.txt`; without it the watcher was blind and every join stalled (2026-11-15)
+- [x] OBS program scene made live before recording — black recordings had valid streams and luma 0 (2026-11-15)
 
 ## Verification notes
 

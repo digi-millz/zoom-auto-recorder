@@ -47,6 +47,7 @@ from scheduler import (
     parse_start,
     parse_when,
     render_countdown,
+    runner_needed,
     seconds_until,
     wait_with_countdown,
 )
@@ -141,6 +142,15 @@ def _setup_logging(verbose: bool, log_file: str | None) -> None:
 def _fail(code: int, message: str) -> NoReturn:
     log.error("%s", message)
     raise click.exceptions.Exit(code)
+
+
+def _obs_password(flag_value: str | None) -> str:
+    """``--obs-password``/``OBS_PASSWORD`` minus the line ending a Windows environment value carries.
+
+    Set as a registry value the password arrives as ``"secret\r"``; OBS answers the handshake with an empty response
+    and the only message is "password may be incorrect", so the CR is trimmed where the value enters.
+    """
+    return (flag_value or "").rstrip("\r\n")
 
 
 GENERIC_WINDOW_TITLES = {"zoom workplace", "zoom meeting", "zoom webinar", ""}
@@ -984,11 +994,17 @@ def _record_session_awake(**kwargs) -> SessionResult:
 def _write_report(
     schedule_path: str | Path, record: dict[str, object], shots_dir: Path | None
 ) -> Path | None:
-    """Write ``logs/reports/<stamp>-<entry>.html`` for this session, or ``None`` without screenshots."""
+    """Write ``logs/reports/<stamp>-<entry>.html`` for this session, or ``None`` without a shots folder.
+
+    A session that never saw a dialog has no screenshots — the recorder only creates that folder when it writes
+    one — and that used to raise here, so every clean join logged "could not write the run report".
+    """
     if shots_dir is None:
         return None
-    try:
+    shots: list[Path] = []
+    if Path(shots_dir).is_dir():
         shots = sorted(path for path in Path(shots_dir).iterdir() if path.is_file())
+    try:
         directory = Path(schedule_path).expanduser().resolve().with_name("logs") / "reports"
         directory.mkdir(parents=True, exist_ok=True)
         stamp = str(record["ts"]).replace(":", "").replace("-", "")
@@ -1254,7 +1270,7 @@ def record(
     except OSError as exc:
         _fail(1, f"cannot create output directory {output_path}: {exc}")
 
-    config = ObsConfig(port=obs_port, password=obs_password or "", record_dir=output_path)
+    config = ObsConfig(port=obs_port, password=_obs_password(obs_password), record_dir=output_path)
 
     if dry_run:
         zoom_target = to_zoommtg(url) if launch_mode == "zoommtg" else None
@@ -1643,7 +1659,7 @@ def _record_entry(
     result = _record_session_awake(
         url=entry.url,
         output_path=output,
-        config=ObsConfig(port=obs_port, password=obs_password or "", record_dir=output),
+        config=ObsConfig(port=obs_port, password=_obs_password(obs_password), record_dir=output),
         obs_exe=obs_exe,
         launch_mode=launch_mode,
         join_timeout=join_timeout,
@@ -1809,7 +1825,7 @@ def run(
             log.warning("marked %d interrupted entry/entries as failed", abandoned)
         _check_orphan_recording(
             ObsConfig(
-                port=obs_port, password=obs_password or "", record_dir=default_output
+                port=obs_port, password=_obs_password(obs_password), record_dir=default_output
             ),
             stop_orphan_recording,
         )
@@ -1988,6 +2004,56 @@ def build_schtasks_args(
     ]
 
 
+WATCHDOG_TASK_SUFFIX = "-watch"
+
+# The watchdog arrives with `run --drain`, which records anything at most --max-late (600 s) late. Firing less often
+# than that would let an entry age past the window it exists to catch.
+WATCHDOG_MAX_MINUTES = 10
+
+
+def build_watchdog_args(
+    *,
+    name: str,
+    schedule_path: str | Path,
+    output_dir: str | Path,
+    log_file: str | Path | None = None,
+    python_exe: str | Path | None = None,
+    minutes: int = 5,
+) -> list[str]:
+    """``schtasks /Create`` for the periodic ``run --drain`` that covers a dead resident runner.
+
+    It takes the runner lock when it fires, so a live resident runner makes it exit immediately with "another runner
+    holds …"; when nothing holds the lock it records what is due, marks the rest ``missed`` and exits. That turns
+    "no runner, no file, no alarm" into a logged state.
+    """
+    if not 1 <= minutes <= WATCHDOG_MAX_MINUTES:
+        raise ValueError(
+            f"watchdog interval must be 1-{WATCHDOG_MAX_MINUTES} minutes to stay inside --max-late (600 s)"
+        )
+    command = build_task_command(
+        schedule_path=schedule_path,
+        output_dir=output_dir,
+        log_file=log_file,
+        python_exe=python_exe,
+        drain=True,
+    )
+    return [
+        "schtasks",
+        "/Create",
+        "/TN",
+        name + WATCHDOG_TASK_SUFFIX,
+        "/SC",
+        "MINUTE",
+        "/MO",
+        str(minutes),
+        "/RL",
+        "LIMITED",
+        "/F",
+        "/TR",
+        subprocess.list2cmdline(command),
+    ]
+
+
 def build_task_xml(
     *,
     schedule_path: str | Path,
@@ -2071,6 +2137,9 @@ def status(
 
     reachable = is_websocket_reachable("127.0.0.1", obs_port)
     pending = store.pending()
+    needs_runner = bool(pending) and runner_needed(
+        pending[0].start_at, datetime.now(), pid
+    )
     if as_json:
         click.echo(
             json.dumps(
@@ -2081,6 +2150,7 @@ def status(
                     "next": pending[0].to_dict() if pending else None,
                     "obs_reachable": reachable,
                     "obs_port": obs_port,
+                    "runner_needed": needs_runner,
                 },
                 indent=2,
             )
@@ -2104,6 +2174,12 @@ def status(
     console.print(
         f"obs socket : {'reachable' if reachable else 'unreachable'} at 127.0.0.1:{obs_port}"
     )
+    if needs_runner:
+        console.print(
+            f"[red]warning    : nothing will record {pending[0].id}[/] — no runner is alive and it starts in "
+            f"{format_delta(seconds_until(pending[0].start_at))}. Start `main.py run`, or register one that "
+            f"cannot be forgotten: `main.py install --restart-on-failure --watchdog`."
+        )
 
 
 
@@ -2221,6 +2297,19 @@ def runs(schedule_path: str, limit: int, as_json: bool) -> None:
     is_flag=True,
     help="Record what is already due at logon, then exit instead of staying resident.",
 )
+@click.option(
+    "--watchdog/--no-watchdog",
+    "watchdog",
+    default=False,
+    help="Also register a periodic `run --drain` that records what is due when the resident runner is dead.",
+)
+@click.option(
+    "--watchdog-minutes",
+    default=5,
+    show_default=True,
+    type=click.IntRange(1, WATCHDOG_MAX_MINUTES),
+    help="How often the watchdog task fires (must stay inside --max-late).",
+)
 def install(
     name: str,
     schedule_path: str,
@@ -2229,6 +2318,8 @@ def install(
     python_exe: str | None,
     restart_on_failure: bool,
     drain: bool,
+    watchdog: bool,
+    watchdog_minutes: int,
 ) -> None:
     """Register the resident runner to start at logon (Windows Task Scheduler)."""
     if not is_windows():
@@ -2292,6 +2383,28 @@ def install(
         for line in queried.stdout.splitlines():
             if line.strip().startswith(("TaskName", "Status", "Next Run Time")):
                 console.print(f"  {line.strip()}")
+    if watchdog:
+        watch_args = build_watchdog_args(
+            name=name,
+            schedule_path=schedule_path,
+            output_dir=output_dir,
+            log_file=log_file,
+            python_exe=python_exe,
+            minutes=watchdog_minutes,
+        )
+        log.info("running: %s", subprocess.list2cmdline(watch_args))
+        watched = subprocess.run(watch_args, capture_output=True, text=True)
+        if watched.returncode != 0:
+            detail = (watched.stderr or watched.stdout).strip()
+            _fail(
+                1,
+                f"the logon task is registered but the watchdog failed "
+                f"({watched.returncode}): {detail}",
+            )
+        console.print(
+            f"[green]installed[/] watchdog [cyan]{name + WATCHDOG_TASK_SUFFIX}[/] "
+            f"(run --drain every {watchdog_minutes} min)"
+        )
 
 
 @cli.command("uninstall")
@@ -2308,6 +2421,20 @@ def uninstall(name: str) -> None:
         detail = (completed.stderr or completed.stdout).strip()
         _fail(1, f"schtasks failed ({completed.returncode}): {detail}")
     console.print(f"[green]removed[/] task [cyan]{name}[/]")
+
+    watched = subprocess.run(
+        ["schtasks", "/Delete", "/TN", name + WATCHDOG_TASK_SUFFIX, "/F"],
+        capture_output=True,
+        text=True,
+    )
+    if watched.returncode == 0:
+        console.print(f"[green]removed[/] watchdog [cyan]{name + WATCHDOG_TASK_SUFFIX}[/]")
+    else:
+        log.debug(
+            "no watchdog task %s to remove: %s",
+            name + WATCHDOG_TASK_SUFFIX,
+            (watched.stderr or watched.stdout).strip(),
+        )
 
 
 @cli.command("import-ics")

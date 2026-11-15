@@ -27,14 +27,11 @@ zoom-auto-recorder/
 
 - Windows 10/11, Python 3.10+
 - Zoom desktop client, installed and **signed in**
-- OBS Studio 28+ (ships obs-websocket 5.x) with a scene that captures the screen
-  you will put the Zoom window on
-- OBS WebSocket server enabled: **Tools → WebSocket Server Settings → Enable**,
-  port `4455`, password optional
-
-```powershell
-python -m pip install -r requirements.txt
-```
+- OBS Studio 28+ (ships obs-websocket 5.x). No scene to build: the recorder creates the Zoom-window capture and
+  the per-process audio source itself and makes that scene live before every recording.
+- Text recognition for Zoom's dialogs comes from Windows OCR via `pywinrt`; `pip install -r requirements.txt` pins it.
+  Without it the watcher cannot read a single label and every join stalls at "Enter your email and name" — the
+  log says `OCR failed: No module named 'winrt'`.
 
 ## Usage
 
@@ -64,7 +61,7 @@ python main.py record --url "https://zoom.us/j/81234567890" --start "2026-11-09 
 | `--start` | required | Local wall-clock time, `YYYY-MM-DD HH:MM` |
 | `--output-dir` | `./recordings` | Directory for the recording; OBS is pointed here when possible |
 | `--obs-port` | `4455` | OBS WebSocket port |
-| `--obs-password` | `$OBS_PASSWORD` | OBS WebSocket password |
+| `--obs-password` | `$OBS_PASSWORD` | OBS WebSocket password; a trailing CR/newline in the environment value is trimmed |
 | `--obs-exe` | auto-detect | `obs64.exe` to launch when OBS is not running |
 | `--launch-mode` | `zoommtg` | `zoommtg` = desktop client via protocol handler, `https` = browser |
 | `--join-timeout` | `300` | Seconds to wait for the meeting window |
@@ -161,12 +158,16 @@ python main.py gui                 # http://127.0.0.1:8765, opens the browser
 python main.py gui --port 8800 --no-open
 ```
 
-The page has a month calendar (days with events are badged), an add form, the entry table with status and
-recorded file, Start/Stop runner controls, and a live runner-log pane.
+The page has a month calendar, an add form, the entry table with status and recorded file, Start/Stop runner
+controls, and a live runner-log pane. Days are badged with the **time** of each event on that day, and a repeating
+event is badged on **every day it will run** (the occurrences come from `recurrence.py` via `/api/occurrences`, so
+the grid and the runner cannot disagree). Clicking a day with one event opens it for editing; a day with several
+scrolls to the entry table.
 
 Add form:
 
-- **Date / Time** — clicking a calendar day fills the date.
+- **Date / Time** — clicking a calendar day fills the date. Clicking a day that already has one event opens that
+  event instead, so a repeat date edits the whole series.
 - **Zoom link** — the whole invite can be pasted; the meeting ID and passcode are extracted.
 - **Repeats** — once / daily / weekly / every 2 weeks / monthly, with weekday checkboxes and an end
   (never / on a date / after N times). This builds a real RRULE, and the line under the form previews the
@@ -198,8 +199,9 @@ previous launch reloads itself once when it sees a 401, because its baked-in tok
 ## Start at logon
 
 ```powershell
+python main.py install --restart-on-failure --watchdog   # recommended: also covers a dead runner
 python main.py install              # Task Scheduler ONLOGON, starts it immediately
-python main.py status               # runner pid, counts, next event, OBS reachability
+python main.py status               # runner pid, counts, next event, OBS warning
 python main.py status --json
 python main.py uninstall
 ```
@@ -215,6 +217,17 @@ An exit 0 (stop marker, or `--drain` done) is not a failure and is not restarted
 `install --drain` registers `run --drain` instead: at logon it records anything
 already due and exits, for a machine that should not keep a recorder alive all
 day. It combines with `--restart-on-failure`.
+
+`--watchdog` registers a second task, `<name>-watch`, running `run --drain` every `--watchdog-minutes` (default 5,
+max 10 — it has to stay inside `--max-late`, or the entry would age out before the sweep sees it). When the
+resident runner is alive the watchdog loses the lock race and exits with "another runner holds …"; when it is dead
+the watchdog records what is due and marks the rest `missed`. That is the difference between a forgotten runner and
+a logged state.
+
+`status` and the UI answer the same question from the same predicate: a pending entry starting within 10 minutes
+with no runner alive prints a red `warning` line (`"runner_needed": true` in `--json`) and the UI's runner chip turns
+red at `needed`. The UI cannot record anything by itself — **Start runner** spawns the process, the watchdog is what
+does it when nobody is looking.
 
 ## Run history
 
@@ -238,7 +251,7 @@ python main.py runs --json          # one object per line, for scripts
 The P4 acceptance questions, answered from the file itself:
 
 ```powershell
-python main.py verify "E:\ZoomRecordings\2026-11-20_1000_Weekly sync.mp4"
+python main.py verify ".\recordings\2026-11-20_1000_Weekly sync.mp4"
 python main.py verify .\recordings --expected-minutes 5   # newest file in the folder
 python main.py verify <file> --json
 ```
@@ -358,9 +371,11 @@ markers, `.ics` parsing, disk preflight, UI token/Origin/Content-Type guards.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `OBS WebSocket not reachable at 127.0.0.1:4455` | server disabled or wrong port | enable Tools → WebSocket Server Settings; pass `--obs-port` |
-| connect fails with authentication error | password mismatch | `--obs-password` or `$env:OBS_PASSWORD` |
+| connect fails with authentication error | password mismatch, or a trailing CR in `$env:OBS_PASSWORD` | `--obs-password`; line endings in the environment value are trimmed |
 | `Your request type is not valid` in OBS logs | `obs-websocket-py` 0.5.x installed | `pip install "obs-websocket-py==1.0"` |
 | `no Zoom meeting window after 300s` | link opened in browser, waiting room, or a Zoom build with different window classes | confirm the desktop client is signed in; join manually; re-run with `-v` to see candidate windows; raise `--join-timeout` |
+| recording is black although Zoom was on screen | OBS was outputting another scene — the recorder builds its own (`Zoom auto-recorder`) and switches to it | look for `switched the OBS program scene to …` in the log; nothing else to do |
+| join stalls at "Enter your email and name" | no OCR engine, or no Zoom email configured | `pip install -r requirements.txt` (pywinrt), and set the email in Settings or `--email` |
 | recording stops after a second | OBS output rejected `StartRecord` (disk full, output busy) | check OBS log; free space; close other recordings |
 | recording lands in the wrong folder | older OBS without `SetRecordDirectory` and unreadable profile key | set the folder in OBS, or use Simple/Advanced output with a file path |
 | Zoom window maximises but is not in front | Windows foreground lock | the maximised window is still recorded; click it once if needed |
@@ -392,7 +407,8 @@ Run these once on the target machine; they cannot be automated here.
 - **OBS is configured for you**: the scene, the Zoom-window capture (DXGI — Windows Graphics Capture renders
   Zoom's CEF windows black) and per-process audio. OBS's global `Desktop Audio`/`Mic/Aux` devices are muted on
   every run, because the desktop device already contains Zoom and would record every voice twice (echo).
-- Your microphone is **not** recorded. There is no per-event mic setting yet.
+- Your microphone is recorded only when the event asks for it (`--mic`, or **Also record my microphone** in the UI).
+  Remote audio is always captured; OBS's global `Mic/Aux` stays muted, so a voice is never in the mix twice.
 - Waiting rooms are not admitted automatically — nothing on the client side can. Recording starts on the waiting
   room window and keeps going; if you are admitted, the capture re-points to the meeting window automatically. If
   the host never admits you, the recording stops once `--waiting-room-timeout` (30 min by default) is exceeded, and

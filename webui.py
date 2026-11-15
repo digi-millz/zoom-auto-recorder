@@ -16,7 +16,7 @@ import sys
 import time
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -26,7 +26,7 @@ import teach
 import zoom_account
 from defaults import DEFAULT_TZ
 from obs_controller import is_websocket_reachable
-from scheduler import ScheduleError, parse_start
+from scheduler import ScheduleError, parse_start, runner_needed
 from store import RunnerLock, ScheduleStore, StoreError, request_stop
 
 RULES_FILE = Path(__file__).with_name("rules.json")
@@ -96,6 +96,7 @@ def default_email(state: UiState, store: ScheduleStore) -> str:
 def status_payload(state: UiState) -> dict:
     store = ScheduleStore(state.schedule_path)
     pending = store.pending()
+    pid = RunnerLock(store.path).owner_pid()
     return {
         "schedule": str(store.path),
         "output_dir": str(output_dir_for(state, store)),
@@ -104,13 +105,43 @@ def status_payload(state: UiState) -> dict:
         "default_email": default_email(state, store),
         "notify_url": store.setting("notify_url") or "",
         "calendar_url": store.setting("calendar_url") or "",
-        "runner_pid": RunnerLock(store.path).owner_pid(),
+        "runner_pid": pid,
+        # Same predicate the CLI uses, so the chip and `main.py status` cannot disagree.
+        "runner_needed": bool(pending) and runner_needed(pending[0].start_at, datetime.now(), pid),
         "obs_reachable": _obs_reachable(state),
         "obs_port": state.obs_port,
         "now": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "next": pending[0].to_dict() if pending else None,
         "entries": [entry.to_dict() for entry in store.sorted_entries()],
     }
+
+def occurrences_payload(state: UiState, month: str) -> dict:
+    """Every start each entry contributes to ``month`` (``"YYYY-MM"``), so the grid can badge repeat dates.
+
+    The store keeps a series as one entry with an RRULE, so ``entry.start`` is the anchor, not the calendar: without
+    this the page showed a weekly meeting on its first date only.
+    """
+    try:
+        first = datetime.strptime(month, "%Y-%m").date()
+    except ValueError as exc:
+        raise ScheduleError(f"month must be YYYY-MM, got {month!r}") from exc
+    last = date(first.year + (first.month == 12), first.month % 12 + 1, 1) - timedelta(days=1)
+
+    store = ScheduleStore(state.schedule_path)
+    found: list[dict] = []
+    for entry in store.sorted_entries():
+        spec = (entry.rrule or "").strip() or recurrence.legacy_repeat_to_rrule(entry.repeat)
+        if not spec:
+            day = parse_start(entry.start).date()
+            if first <= day <= last:
+                found.append({"id": entry.id, "start": entry.start})
+            continue
+        for moment in recurrence.occurrences_between(
+            spec, entry.start, entry.tz, first_day=first, last_day=last
+        ):
+            found.append({"id": entry.id, "start": moment.strftime("%Y-%m-%d %H:%M")})
+    found.sort(key=lambda item: item["start"])
+    return {"month": month, "occurrences": found}
 
 
 def preview_payload(payload: dict) -> dict:
@@ -289,6 +320,15 @@ class UiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, status_payload(self.state))
             except StoreError as exc:
                 self._send_json(500, {"error": str(exc)})
+        elif path == "/api/occurrences":
+            if not self._guard():
+                return
+            query = parse_qs(parsed.query)
+            month = (query.get("month") or [datetime.now().strftime("%Y-%m")])[0]
+            try:
+                self._send_json(200, occurrences_payload(self.state, month))
+            except (ScheduleError, StoreError) as exc:
+                self._send_json(400, {"error": str(exc)})
         elif path == "/api/log":
             if not self._guard():
                 return

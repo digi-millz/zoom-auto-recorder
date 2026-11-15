@@ -1,7 +1,12 @@
-# Spike results (measured on this machine)
+# Spike results (measured, not required)
 
-Windows 11 26300, Zoom desktop (per-user install), OBS Studio 33.0.0, obs-websocket 5.7.6,
-Python 3.13.2, 96 DPI / 100 % scaling.
+These are dated observations from **one** machine, not a specification: the box's current details live in
+`MACHINE.md` (gitignored, replaced per machine). They stay in the repo because they are the evidence behind the
+code's choices — window classes, capture method, audio shape — and because the numbers are reproducible by re-running
+the same probes. Hardware changes are recorded in place; see the 2026-11-15 section at the end.
+
+At the 2026-11-14 measurement: Windows 11 26300, Zoom desktop (per-user install), OBS Studio 33.0.0,
+obs-websocket 5.7.6, Python 3.13.2, 96 DPI / 100 % scaling.
 
 ## Zoom windows observed
 
@@ -123,3 +128,30 @@ globals muted, versus audible capture before. Zoom itself is still captured once
 | `…/85330823611` | Disclosure → prejoin → waiting room | 30 s take of the waiting room, host never admitted |
 | `…/89538600487` | prejoin → admitted | 21 s take of the real meeting ("Wealth Workshop") |
 | scheduled via UI | join → record → stop on window close | 111 s / 82 MB, exit 0, named `…_zoom-89712840393.mp4` |
+
+## 2026-11-15 — live re-verification (fresh checkout)
+
+Same machine, but the hardware and the dependency set had moved: **RTX 2070 SUPER** (not the GTX 1060 above) +
+UHD 630, three 1920×1080 panels, OBS 33.0.1, a new `.venv`. Four defects only a live join can expose:
+
+| Symptom | Measurement | Cause / fix |
+| --- | --- | --- |
+| Watcher blind, join stuck at "Enter your email and name" | 14 × `OCR failed: No module named 'winrt'` | `requirements.txt` never listed the OCR ladder; pywinrt now pinned (`winrt-runtime`, `.Media.Ocr`, `.Graphics.Imaging`, `.Storage`, `.Globalization`, `.Foundation`) |
+| Recording had valid streams but every frame black | `ffmpeg -ss 30 … -frames:v 1` → max luma **0**; `scene.source_luma` **0** | OBS was outputting the **user's** scene (`Zoom Meet`), not the app's: `scene.prepare` built `Zoom auto-recorder` but never made it live. Luma of the same source read **255** immediately after `SetCurrentProgramScene` |
+| "email entry confirmed" yet the field was empty | before/after screenshots show the placeholder still there | typing 250 ms after the click lost the CEF focus, and "the text changed" was accepted as success. Now: 0.5 s settle, and the address itself must appear in the re-read |
+| `could not write the run report: [WinError 3] … _shots\<id>` | a join that saw no dialog has no shots folder | `_write_report` now treats a missing folder as "no screenshots" |
+
+Verified after the fixes, against the 16:00 link (waiting room, host absent):
+
+```
+13:56:31 OBS confirmed the recording is active
+13:56:32 Zoom process exited              ← Zoom killed mid-recording
+13:56:33 OBS confirmed the recording stopped
+13:56:33 recording ready: …_zoom-89712840393.mp4 (12s, 9.2 MB, video=True audio=True, remuxed)
+exit 0 · verify: duration 12.3s, 1 video stream, 1 audio stream, PASS · frame at t=5s: max luma 255
+```
+
+Still unproven: the `close_grace` branch (meeting window disappears while `Zoom.exe` keeps running). Closing the
+CEF waiting-room window with `WM_CLOSE` did not actually close it, so the recorder correctly kept running —
+`select_meeting_window` requires a visible window. The process-exit branch above covers the same code path minus
+the `find_process()` check.

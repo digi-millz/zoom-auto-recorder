@@ -95,5 +95,29 @@ class WaitWithCountdownTests(unittest.TestCase):
 
 
 
+
+class RunnerNeededTests(unittest.TestCase):
+    """A pending entry with no runner alive is a meeting that silently goes unrecorded."""
+
+    NOW = datetime(2026, 11, 15, 12, 0)
+
+    def test_no_runner_and_a_start_inside_the_lead_time_needs_one(self):
+        self.assertTrue(
+            scheduler.runner_needed(self.NOW + timedelta(minutes=5), self.NOW, None)
+        )
+
+    def test_a_live_runner_or_a_distant_start_does_not(self):
+        self.assertFalse(
+            scheduler.runner_needed(self.NOW + timedelta(minutes=5), self.NOW, 4242)
+        )
+        self.assertFalse(
+            scheduler.runner_needed(self.NOW + timedelta(hours=3), self.NOW, None)
+        )
+
+    def test_a_start_already_past_still_needs_one(self):
+        self.assertTrue(
+            scheduler.runner_needed(self.NOW - timedelta(minutes=2), self.NOW, None)
+        )
+
 if __name__ == "__main__":
     unittest.main()

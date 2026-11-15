@@ -15,3 +15,6 @@ dist/
 build/
 shots/
 
+# Per-machine facts (paths, GPUs, monitors, what is installed here). One checkout per machine, different contents.
+MACHINE.md
+
