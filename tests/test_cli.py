@@ -1,3 +1,5 @@
+import ast
+import inspect
 import json
 import os
 import tempfile
@@ -14,6 +16,35 @@ from window_manager import WindowInfo
 
 MEETING = WindowInfo(7, 1, "Weekly sync", "ZPContentViewWndClass", True, 1280, 720)
 WAITING = WindowInfo(8, 1, "Zoom Meeting", cli.WAITING_ROOM_CLASS, True, 1280, 720)
+
+
+class SessionCallSiteTests(unittest.TestCase):
+    """A new session option must be wired into both entry points, or it silently does nothing."""
+
+    def test_record_and_the_runner_pass_every_session_parameter(self):
+        source = Path(cli.__file__).read_text(encoding="utf-8")
+        calls = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_record_session_awake"
+        ]
+        self.assertEqual(len(calls), 2, "expected the single-shot recorder and the runner")
+        parameters = {
+            name
+            for name in inspect.signature(cli._record_session).parameters
+            if name != "should_stop"  # only the runner polls the stop marker
+        }
+        for call in calls:
+            self.assertFalse(
+                [kw for kw in call.keywords if kw.arg is None],
+                "a **splat hides missing options from this check",
+            )
+            keywords = {kw.arg for kw in call.keywords}
+            self.assertEqual(
+                parameters - keywords,
+                set(),
+                f"line {call.lineno}: a _record_session parameter is not passed here",
+            )
 
 
 class FakeController:

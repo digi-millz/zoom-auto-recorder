@@ -2,7 +2,7 @@
 
 Remaining work. Everything else — scheduling, joining, dialog handling, recording, crash resume, notifications,
 recurrence/tz, calendar sync, run history, HTML reports, disk/lock/black guards — is implemented and covered by
-`python -m unittest discover -s tests -t .` (286 tests). These items are open because they need something this
+`python -m unittest discover -s tests -t .` (294 tests). These items are open because they need something this
 machine cannot provide: a live meeting, your unlocked session, or Task Scheduler rights.
 
 ## Blocked on a live session

@@ -110,18 +110,23 @@ next-occurrence preview).
 
 ## 4. Config shapes
 
-`schedule.json` entry (additive; `repeat` kept as a legacy alias):
+`schedule.json` entry as implemented (`store.Entry`; unknown keys are ignored on load, `repeat` kept as a legacy
+alias for `rrule`):
 
 ```json
 {
   "id": "4bfaf89e", "url": "https://us02web.zoom.us/j/81234567890?pwd=abc",
   "start": "2026-11-09 10:00", "tz": "Europe/London",
-  "rrule": "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE", "recur_until": null,
-  "duration_min": 60, "prejoin_sec": 180, "display_name": "Recorder",
-  "mic": false, "record_waiting_room": true, "auto_leave": true,
-  "output_dir": null, "note": "standup", "status": "pending"
+  "rrule": "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE", "anchor": "2026-11-09 10:00",
+  "repeat": null, "output_dir": null, "note": "standup", "email": null,
+  "mic": false, "status": "pending", "created": "2026-11-01 09:00:00",
+  "last_exit_code": null, "last_path": null
 }
 ```
+
+Settings live next to the entries (`settings.output_dir`, `settings.email`, `settings.notify_url`,
+`settings.calendar_url`). Session options (`duration_min`, `prejoin_sec`, …) are CLI flags on `record`/`run`, not
+per-entry keys — the entry owns only what differs between meetings.
 
 `rules.json` — behaviour as data, so a Zoom rename doesn't need a code change:
 

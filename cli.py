@@ -1588,6 +1588,121 @@ def edit_meeting(
         console.print(f"  into: {updated.output_dir}")
 
 
+@dataclass(frozen=True)
+class EntryOutcome:
+    """What the runner should do after one entry: count a failure, stop, or carry on."""
+
+    failed: bool = False
+    stop: bool = False
+
+
+def _record_entry(
+    schedule: ScheduleStore,
+    entry: Entry,
+    *,
+    default_output: Path,
+    obs_port: int,
+    obs_password: str | None,
+    obs_exe: str | None,
+    launch_mode: str,
+    join_timeout: float,
+    join_delay: float,
+    max_duration: float,
+    close_grace: float,
+    waiting_room_timeout: float,
+    keep_recording_on_interrupt: bool,
+    min_free_gb: float,
+    notify_url: str | None,
+    steal_meeting: bool,
+    quality: str,
+    retention_days: int,
+    window_classes: tuple[str, ...],
+    window_title: str | None,
+    passcode: str | None,
+    auto_accept: bool,
+    auto_accept_seconds: float,
+) -> EntryOutcome:
+    """Record one due entry: pick its folder, run the session, mark, notify, prune, roll forward."""
+    # Re-read the saved folder per entry so changing it in the UI takes effect without restarting the runner;
+    # an entry's own folder still wins.
+    configured = schedule.setting("output_dir")
+    base_output = Path(configured).expanduser().resolve() if configured else default_output
+    output = (
+        Path(entry.output_dir).expanduser().resolve() if entry.output_dir else base_output
+    )
+    try:
+        output.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.error("entry %s: cannot create %s: %s", entry.id, output, exc)
+        schedule.mark(entry.id, STATUS_FAILED, exit_code=1)
+        return EntryOutcome(failed=True)
+
+    log.info("recording entry %s (%s) into %s", entry.id, entry.start, output)
+    schedule.mark(entry.id, STATUS_RUNNING)
+    started_mono = time.monotonic()
+    result = _record_session_awake(
+        url=entry.url,
+        output_path=output,
+        config=ObsConfig(port=obs_port, password=obs_password or "", record_dir=output),
+        obs_exe=obs_exe,
+        launch_mode=launch_mode,
+        join_timeout=join_timeout,
+        join_delay=join_delay,
+        max_duration=max_duration,
+        close_grace=close_grace,
+        waiting_room_timeout=waiting_room_timeout,
+        keep_recording_on_interrupt=keep_recording_on_interrupt,
+        min_free_gb=min_free_gb,
+        window_classes=window_classes,
+        window_title=window_title,
+        passcode=passcode,
+        email=entry.email or schedule.setting("email") or zoom_account.discover(),
+        auto_accept=auto_accept,
+        auto_accept_seconds=auto_accept_seconds,
+        should_stop=lambda: stop_requested(schedule.path),
+        notify_url=notify_url or schedule.setting("notify_url"),
+        steal_meeting=steal_meeting,
+        quality=quality,
+        mic=entry.mic,
+    )
+    _log_session(
+        schedule.path,
+        entry_id=entry.id,
+        meeting=entry.note or _recording_title("", entry.url),
+        scheduled=entry.start,
+        result=result,
+        seconds=int(time.monotonic() - started_mono),
+    )
+
+    status = STATUS_DONE if result.exit_code == EXIT_OK else STATUS_FAILED
+    schedule.mark(entry.id, status, exit_code=result.exit_code, path=result.path)
+    notify.send(
+        notify_url or schedule.setting("notify_url"),
+        notify.Event(
+            notify.DONE if status == STATUS_DONE else notify.FAILED,
+            meeting=entry.note or entry.url,
+            path=result.path,
+            exit_code=result.exit_code,
+        ),
+    )
+    log.info(
+        "entry %s finished: exit %s%s",
+        entry.id,
+        result.exit_code,
+        f", saved {result.path}" if result.path else "",
+    )
+    postprocess.prune(output, retention_days)
+    if entry.repeat and not result.interrupted and not stop_requested(schedule.path):
+        rolled = schedule.roll_repeat(entry.id)
+        if rolled is not None:
+            log.info("next occurrence of %s: %s", entry.id, rolled.start)
+
+    return EntryOutcome(
+        failed=result.exit_code != EXIT_OK,
+        stop=result.interrupted or stop_requested(schedule.path),
+    )
+
+
 @cli.command("run")
 @click.option(
     "--schedule",
@@ -1766,36 +1881,12 @@ def run(
                 continue
 
             assert entry is not None
-            # Re-read the saved folder per entry so changing it in the UI takes effect without restarting the
-            # runner; an entry's own folder still wins.
-            configured = schedule.setting("output_dir")
-            base_output = (
-                Path(configured).expanduser().resolve() if configured else default_output
-            )
-            output = (
-                Path(entry.output_dir).expanduser().resolve()
-                if entry.output_dir
-                else base_output
-            )
-            try:
-                output.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                log.error("entry %s: cannot create %s: %s", entry.id, output, exc)
-                schedule.mark(entry.id, STATUS_FAILED, exit_code=1)
-                failures += 1
-                if once:
-                    break
-                continue
-
-            log.info("recording entry %s (%s) into %s", entry.id, entry.start, output)
-            schedule.mark(entry.id, STATUS_RUNNING)
-            started_mono = time.monotonic()
-            result = _record_session_awake(
-                url=entry.url,
-                output_path=output,
-                config=ObsConfig(
-                    port=obs_port, password=obs_password or "", record_dir=output
-                ),
+            outcome = _record_entry(
+                schedule,
+                entry,
+                default_output=default_output,
+                obs_port=obs_port,
+                obs_password=obs_password,
                 obs_exe=obs_exe,
                 launch_mode=launch_mode,
                 join_timeout=join_timeout,
@@ -1805,55 +1896,19 @@ def run(
                 waiting_room_timeout=waiting_room_timeout,
                 keep_recording_on_interrupt=keep_recording_on_interrupt,
                 min_free_gb=min_free_gb,
+                notify_url=notify_url,
+                steal_meeting=steal_meeting,
+                quality=quality,
+                retention_days=retention_days,
                 window_classes=window_classes,
                 window_title=window_title,
                 passcode=passcode,
-                email=entry.email
-                or schedule.setting("email")
-                or zoom_account.discover(),
                 auto_accept=auto_accept,
                 auto_accept_seconds=auto_accept_seconds,
-                should_stop=lambda: stop_requested(schedule.path),
-                notify_url=notify_url or schedule.setting("notify_url"),
-                steal_meeting=steal_meeting,
-                quality=quality,
-                mic=entry.mic,
             )
-            _log_session(
-                schedule.path,
-                entry_id=entry.id,
-                meeting=entry.note or _recording_title("", entry.url),
-                scheduled=entry.start,
-                result=result,
-                seconds=int(time.monotonic() - started_mono),
-            )
-
-            status = STATUS_DONE if result.exit_code == EXIT_OK else STATUS_FAILED
-            if result.exit_code != EXIT_OK:
+            if outcome.failed:
                 failures += 1
-            schedule.mark(entry.id, status, exit_code=result.exit_code, path=result.path)
-            notify.send(
-                notify_url or schedule.setting("notify_url"),
-                notify.Event(
-                    notify.DONE if status == STATUS_DONE else notify.FAILED,
-                    meeting=entry.note or entry.url,
-                    path=result.path,
-                    exit_code=result.exit_code,
-                ),
-            )
-            log.info(
-                "entry %s finished: exit %s%s",
-                entry.id,
-                result.exit_code,
-                f", saved {result.path}" if result.path else "",
-            )
-            postprocess.prune(output, retention_days)
-            if entry.repeat and not result.interrupted and not stop_requested(schedule.path):
-                rolled = schedule.roll_repeat(entry.id)
-                if rolled is not None:
-                    log.info("next occurrence of %s: %s", entry.id, rolled.start)
-
-            if once or result.interrupted or stop_requested(schedule.path):
+            if once or outcome.stop:
                 break
     except KeyboardInterrupt:
         console.print("[yellow]runner stopped[/]")

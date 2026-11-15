@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+import psutil
+
 import invite
 import recurrence
 
@@ -104,6 +106,8 @@ def validated_output_dir(value: str | Path | None) -> str | None:
         raise ScheduleError(f"output_dir must be an absolute path: {text!r}")
     if not path.parent.is_dir():
         raise ScheduleError(f"output_dir's parent folder does not exist: {path.parent}")
+    if path.exists() and not path.is_dir():
+        raise ScheduleError(f"output_dir is a file, not a folder: {path}")
     return str(path)
 
 
@@ -504,7 +508,6 @@ class RunnerLock:
             return None
         if pid <= 0:
             return None
-        import psutil
 
         try:
             return pid if psutil.pid_exists(pid) else None
@@ -530,7 +533,6 @@ class RunnerLock:
                 return False
             if pid <= 0:
                 return False
-            import psutil
 
             try:
                 return psutil.pid_exists(pid)

@@ -26,7 +26,6 @@ from typing import Any, Callable, Sequence
 log = logging.getLogger(__name__)
 
 DEFAULT_PORT = 4455
-RECORD_STARTED = "OBS_WEBSOCKET_OUTPUT_STARTED"
 RECORD_STOPPED = "OBS_WEBSOCKET_OUTPUT_STOPPED"
 
 # Profile keys holding the recording directory, in the order OBS versions use them.

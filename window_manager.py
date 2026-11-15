@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from typing import Iterable, Iterator, Sequence
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
+import psutil
+
 log = logging.getLogger(__name__)
 
 SW_RESTORE = 9
@@ -207,7 +209,6 @@ def _class_name(hwnd: int) -> str:
 
 def _process_names(pids: Sequence[int]) -> dict[int, str]:
     """Map pid -> lowercased image name; unknown pids are omitted."""
-    import psutil
 
     names: dict[int, str] = {}
     for pid in dict.fromkeys(pids):
@@ -262,7 +263,6 @@ def iter_windows(process_name: str = ZOOM_PROCESS) -> list[WindowInfo]:
 
 def find_process(process_name: str = ZOOM_PROCESS) -> int | None:
     """Return the pid of the first process with *process_name*, else ``None``."""
-    import psutil
 
     target = process_name.lower()
     for proc in psutil.process_iter(["pid", "name"]):

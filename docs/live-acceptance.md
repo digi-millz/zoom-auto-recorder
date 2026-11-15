@@ -1,7 +1,7 @@
 # Live acceptance
 
 The five checks that need a real meeting (or a locked desktop), with the exact commands and the output that proves
-each one. Everything else is covered by `python -m unittest discover -s tests -t .` (293 tests).
+each one. Everything else is covered by `python -m unittest discover -s tests -t .` (294 tests).
 
 Preconditions: OBS Studio running with the WebSocket server enabled (port 4455), the Zoom desktop client signed in,
 and a meeting you can host or join (passcode/disclaimer allowed — the point is that the dialogs appear).

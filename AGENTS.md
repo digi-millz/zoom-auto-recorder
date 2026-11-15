@@ -40,7 +40,7 @@ the road.
    `recurrence.next_start_local`, `window_manager.select_meeting_window`). Only the thin edge touches Win32.
 7. **Keep the suite green.** Add tests for new pure logic; do not weaken existing assertions, and delete tests that
    only pin removed code.
-8. **Failures are states, not exceptions.** `missed`, `needs_attention`, exit codes 0–8. A silent no-file is a
+8. **Failures are states, not exceptions.** `missed`, `needs_attention`, exit codes 0–9. A silent no-file is a
    bug; a logged, alarmed no-file is acceptable.
 
 ## Windows gotchas (already bitten)
@@ -66,6 +66,9 @@ the road.
 | `window_manager.py` | zoommtg launch, window discovery/selection, maximise, `click_at`, `type_text` |
 | `obs_controller.py` | obs-websocket v5 client, record control, directory override, crash-marker guard |
 | `webui.py`, `ui.html` | localhost calendar/control panel (token-guarded, single instance) |
+| `notify.py` | opt-in webhook (done/failed/needs_attention/missed), never blocks a recording |
+| `invite.py` | parse a pasted invitation (link, spaced meeting ID, passcode) and compare meeting identity |
+| `defaults.py` | values shared by CLI, UI and runner (the UI's default zone) |
 | `ics.py` | `.ics` import |
 | `dialogs.py` | pure rule matching: OCR words → the click to make (no Win32) |
 | `watcher.py` | session loop: capture → read → decide → click → verify → alert |
@@ -76,7 +79,8 @@ the road.
 | `report.py` | per-run HTML report: record + screenshots → one self-contained file (pure) |
 | `teach.py` | teach mode: unmatched-dialog screenshots → validated `rules.json` rule (pure) |
 | `rules.json` | dialog labels and limits (data, not code) |
-| `tests/` | unittest; live-meeting evidence in `docs/spikes.md` |
+| `docs/` | `spikes.md` (live-meeting evidence), `live-acceptance.md` (the checks that need a meeting) |
+| `tests/` | unittest (no Zoom/OBS required) |
 
 ## Workflow
 

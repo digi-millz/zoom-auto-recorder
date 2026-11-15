@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Mapping
 
+from obswebsocket import requests
 from window_manager import WindowInfo
 
 log = logging.getLogger(__name__)
@@ -95,7 +96,6 @@ def prepare(
     Idempotent: run it before every recording, and again when the meeting title changes. Returns the source names
     that were ensured.
     """
-    from obswebsocket import requests
 
     scenes = _data(call(requests.GetSceneList())).get("scenes", [])
     if scene not in _names(scenes, "sceneName"):
@@ -162,7 +162,6 @@ def mute_global_audio(call: Call, names: tuple[str, ...] = GLOBAL_AUDIO_SOURCES)
     Muting (not removing) keeps the devices configured: the change is visible in OBS's mixer, and it applies to
     this machine's recorder only. A missing device is not an error — OBS lets you delete them.
     """
-    from obswebsocket import requests
 
     muted: list[str] = []
     for name in names:
@@ -191,7 +190,6 @@ def ensure_microphone(
     deleting) a leftover source is deliberate: switching an entry back to remote-only must silence the mic without
     destroying an OBS input the user may have configured.
     """
-    from obswebsocket import requests
 
     inputs = _data(call(requests.GetInputList())).get("inputs", [])
     existing = {str(item.get("inputName")): str(item.get("inputKind")) for item in inputs}
@@ -248,7 +246,6 @@ def source_luma(call: Call, source: str = WINDOW_SOURCE, width: int = 320) -> in
     import io
 
     from PIL import Image
-    from obswebsocket import requests
 
     try:
         response = call(

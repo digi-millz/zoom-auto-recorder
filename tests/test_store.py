@@ -120,6 +120,17 @@ class StorePersistenceTests(unittest.TestCase):
                 output_dir=str(self.path.parent / "missing" / "rec"),
             )
 
+    def test_an_output_dir_that_is_a_file_is_rejected(self):
+        blocker = self.path.parent / "blocked"
+        blocker.write_text("x", encoding="utf-8")
+        store = ScheduleStore(self.path)
+        with self.assertRaises(ScheduleError):
+            store.add(
+                url="https://zoom.us/j/1",
+                start_at="2026-11-09 18:30",
+                output_dir=str(blocker),
+            )
+
     def test_the_microphone_flag_persists_and_edits(self):
         store = ScheduleStore(self.path)
         added = store.add(url="https://zoom.us/j/1", start_at="2026-11-09 18:30", mic=True)
