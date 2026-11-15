@@ -93,5 +93,26 @@ class WaitingRoomTimeoutTests(unittest.TestCase):
     def test_not_in_the_waiting_room_is_never_expired(self) -> None:
         self.assertFalse(cli.waiting_room_expired(None, 99999.0, 60.0))
 
+
+class DiskGuardTests(unittest.TestCase):
+    def test_unlimited_threshold_is_never_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(cli.disk_is_low(Path(tmp), 0))
+
+    def test_impossible_threshold_is_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(cli.disk_is_low(Path(tmp), 1_000_000))
+
+    def test_unreadable_path_is_not_treated_as_low(self) -> None:
+        # A transient stat failure must not end a recording.
+        self.assertFalse(cli.disk_is_low(Path("Z:/no-such-volume"), 1))
+
+    def test_free_gb_reads_a_real_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            available = cli.free_gb(Path(tmp))
+        self.assertIsNotNone(available)
+        assert available is not None
+        self.assertGreater(available, 0)
+
 if __name__ == "__main__":
     unittest.main()

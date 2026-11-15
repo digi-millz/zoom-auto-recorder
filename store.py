@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import uuid
+import shutil
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -139,6 +140,11 @@ class ScheduleStore:
         temporary = self.path.with_name(self.path.name + ".tmp")
         try:
             temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            # One generation back, so a mistaken delete in the UI is recoverable. Best effort: a failed backup
+            # must never block the write that actually matters.
+            if self.path.exists():
+                with suppress(OSError):
+                    shutil.copyfile(self.path, self.path.with_name(self.path.name + ".bak"))
             os.replace(temporary, self.path)
         except OSError as exc:
             raise StoreError(f"cannot write {self.path}: {exc}") from exc

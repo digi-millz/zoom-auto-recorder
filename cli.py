@@ -147,6 +147,28 @@ def _recording_title(window_title: str, url: str) -> str:
     return f"zoom-{match.group(1)}" if match else (title or "meeting")
 
 
+
+def free_gb(path: Path) -> float | None:
+    """Free space in GB for *path*, or ``None`` when it cannot be read."""
+    try:
+        return shutil.disk_usage(path).free / 1_000_000_000
+    except OSError as exc:
+        log.debug("cannot read free space for %s: %s", path, exc)
+        return None
+
+
+def disk_is_low(path: Path, min_free_gb: float) -> bool:
+    """True when the volume holding *path* has less than *min_free_gb* left.
+
+    An unreadable path is **not** treated as low: a transient stat failure must not end a recording.
+    """
+    if not min_free_gb:
+        return False
+    available = free_gb(path)
+    return available is not None and available < min_free_gb
+
+DISK_CHECK_INTERVAL = 30.0
+
 WAITING_ROOM_CLASS = "zWaitingRoomWndClass"
 
 
@@ -164,6 +186,8 @@ def _monitor(
     title_pattern=None,
     on_window_change: Callable[[object], None] | None = None,
     waiting_room_timeout: float = 0.0,
+    output_path: Path | None = None,
+    min_free_gb: float = 0.0,
 ) -> int:
     """Record until the meeting window goes away for *close_grace* seconds.
 
@@ -180,6 +204,7 @@ def _monitor(
     gone_since: float | None = None
     waiting_since: float | None = None
     current: tuple[int, str, str] | None = None
+    next_disk_check = started
     while True:
         now = time.monotonic()
         if should_stop():
@@ -233,6 +258,16 @@ def _monitor(
                     return EXIT_OK
             else:
                 waiting_since = None
+
+        if output_path is not None and now >= next_disk_check:
+            next_disk_check = now + DISK_CHECK_INTERVAL
+            if disk_is_low(output_path, min_free_gb):
+                log.error(
+                    "free space in %s dropped below %.1f GB; stopping the recording to keep the file usable",
+                    output_path,
+                    min_free_gb,
+                )
+                return EXIT_DISK
 
         if max_duration and now - started >= max_duration:
             log.warning("maximum recording duration (%.0fs) reached", max_duration)
@@ -600,6 +635,8 @@ def _record_session(
             title_pattern,
             on_window_change=repoint,
             waiting_room_timeout=waiting_room_timeout,
+            output_path=output_path,
+            min_free_gb=min_free_gb,
         )
     except KeyboardInterrupt:
         interrupted = True

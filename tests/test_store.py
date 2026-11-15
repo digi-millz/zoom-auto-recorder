@@ -295,5 +295,21 @@ class UpdateTests(unittest.TestCase):
         self.assertIsNone(self.store.update("nosuchid", note="x"))
 
 
+class BackupTests(unittest.TestCase):
+    def test_previous_schedule_is_kept_as_bak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "schedule.json"
+            store = ScheduleStore(path)
+            store.add(url="https://zoom.us/j/1", start_at="2026-12-01 10:00", note="first")
+            store.add(url="https://zoom.us/j/2", start_at="2026-12-02 10:00", note="second")
+
+            backup = Path(str(path) + ".bak")
+            self.assertTrue(backup.exists(), "a mistaken delete should be recoverable")
+            notes = [
+                entry["note"] for entry in json.loads(backup.read_text(encoding="utf-8"))["entries"]
+            ]
+            self.assertEqual(notes, ["first"], "the .bak holds the generation before the last write")
+
+
 if __name__ == "__main__":
     unittest.main()
