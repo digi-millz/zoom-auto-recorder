@@ -233,6 +233,20 @@ python main.py runs --limit 50
 python main.py runs --json          # one object per line, for scripts
 ```
 
+## Verify a recording
+
+The P4 acceptance questions, answered from the file itself:
+
+```powershell
+python main.py verify "E:\ZoomRecordings\2026-11-20_1000_Weekly sync.mp4"
+python main.py verify .\recordings --expected-minutes 5   # newest file in the folder
+python main.py verify <file> --json
+```
+
+It fails (exit 7) when there is more than one video stream — something besides the Zoom window got captured —
+when audio is missing, when the duration is zero, or when the duration is more than 10% (at least 5 s) away from
+`--expected-minutes`. Exit 0 means: one video stream, audio present, length as expected.
+
 ## Import a calendar (file or feed)
 
 ```powershell

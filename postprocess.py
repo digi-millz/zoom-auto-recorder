@@ -102,6 +102,73 @@ def parse_probe(payload: str) -> tuple[float, bool, bool]:
     return duration, "video" in kinds, "audio" in kinds
 
 
+@dataclass(frozen=True)
+class Verdict:
+    """The P4 acceptance questions, answered from one ffprobe payload."""
+
+    duration: float
+    video_streams: int
+    audio_streams: int
+    width: int | None
+    height: int | None
+    problems: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+
+def assess(payload: str, expected_seconds: float | None = None) -> Verdict:
+    """Judge a recording: one video stream (the Zoom window), audio present, duration sane.
+
+    Two video streams mean the scene captured something besides the meeting or was recorded twice; no audio means
+    the mix was wrong; a duration far from the wall clock means the recording started late, stopped early, or is
+    the wrong file. Pure: the caller supplies ffprobe's JSON.
+    """
+    data = json.loads(payload or "{}")
+    streams = data.get("streams", []) or []
+    video = [stream for stream in streams if str(stream.get("codec_type")) == "video"]
+    audio = [stream for stream in streams if str(stream.get("codec_type")) == "audio"]
+    duration, _has_video, _has_audio = parse_probe(payload)
+    width = video[0].get("width") if video else None
+    height = video[0].get("height") if video else None
+
+    problems: list[str] = []
+    if not video:
+        problems.append("no video stream")
+    elif len(video) > 1:
+        problems.append(f"{len(video)} video streams (expected one: the Zoom window)")
+    if not audio:
+        problems.append("no audio stream")
+    if duration <= 0:
+        problems.append("duration is zero")
+    if expected_seconds and duration > 0:
+        allowed = max(5.0, expected_seconds * 0.1)
+        if abs(duration - expected_seconds) > allowed:
+            problems.append(
+                f"duration {duration:.0f}s is {abs(duration - expected_seconds):.0f}s away from the "
+                f"{expected_seconds:.0f}s expected"
+            )
+    return Verdict(duration, len(video), len(audio), width, height, tuple(problems))
+
+
+def probe_payload(path: Path) -> str | None:
+    """ffprobe's JSON for *path*, or ``None`` when ffprobe is missing or rejects the file."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        log.warning("ffprobe is not on PATH; cannot verify %s", path)
+        return None
+    try:
+        result = _run(probe_args(path, ffprobe))
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("ffprobe failed on %s: %s", path, exc)
+        return None
+    if result.returncode != 0:
+        log.warning("ffprobe rejected %s: %s", path, (result.stderr or "").strip()[:200])
+        return None
+    return result.stdout
+
+
 def _run(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, timeout=600, check=False)
 

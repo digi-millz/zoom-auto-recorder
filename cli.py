@@ -2386,6 +2386,66 @@ def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")[:40] or "window"
 
 
+@cli.command("verify")
+@click.argument("recording", type=click.Path(exists=True))
+@click.option(
+    "--expected-minutes",
+    default=None,
+    type=click.FloatRange(min=0.1),
+    help="How long the meeting actually ran; the file must be within 10% (5 s minimum).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the verdict as JSON.")
+def verify(recording: str, expected_minutes: float | None, as_json: bool) -> None:
+    """Check a finished recording: one video stream, audio present, duration sane (P4 acceptance)."""
+    path = Path(recording)
+    if path.is_dir():
+        media = sorted(
+            (item for item in path.iterdir() if item.suffix.lower() in (".mp4", ".mkv")),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if not media:
+            _fail(1, f"no .mp4/.mkv files in {path}")
+        path = media[0]
+    payload = postprocess.probe_payload(path)
+    if payload is None:
+        _fail(1, f"ffprobe could not read {path}")
+    verdict = postprocess.assess(
+        payload, expected_seconds=expected_minutes * 60 if expected_minutes else None
+    )
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "file": str(path),
+                    "ok": verdict.ok,
+                    "duration": verdict.duration,
+                    "video_streams": verdict.video_streams,
+                    "audio_streams": verdict.audio_streams,
+                    "width": verdict.width,
+                    "height": verdict.height,
+                    "problems": list(verdict.problems),
+                },
+                indent=2,
+            )
+        )
+    else:
+        console.print(f"file     : {path}")
+        console.print(f"duration : {verdict.duration:.1f}s")
+        console.print(
+            f"video    : {verdict.video_streams} stream(s)"
+            + (f", {verdict.width}x{verdict.height}" if verdict.width else "")
+        )
+        console.print(f"audio    : {verdict.audio_streams} stream(s)")
+        if verdict.ok:
+            console.print("[green]verdict  : PASS[/]")
+        else:
+            console.print("[red]verdict  : FAIL[/]")
+            for problem in verdict.problems:
+                console.print(f"  - {problem}")
+    raise click.exceptions.Exit(EXIT_OK if verdict.ok else EXIT_NO_FILE)
+
+
 @cli.command("inspect")
 @click.option("--url", default=None, help="Join link; launches the Zoom client when given.")
 @click.option("--passcode", default=None, help="Meeting passcode if the link lacks ?pwd=.")
