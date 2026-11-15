@@ -97,6 +97,13 @@ class ObsController:
             raise ObsError(f"OBS rejected {name}: {getattr(result, 'datain', {})}")
         return result
 
+    def call(self, request: Any) -> Any:
+        """Send a request, raising :class:`ObsError` when OBS rejects it.
+
+        Public so scene setup (`scene.prepare`) reuses this connection and its error semantics.
+        """
+        return self._call(request)
+
     @property
     def connected(self) -> bool:
         return self._client is not None
@@ -462,6 +469,36 @@ def is_obs_running() -> bool:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return False
+
+
+def crash_flag_path(appdata: str | Path | None = None) -> Path:
+    """OBS's unclean-shutdown marker (``%APPDATA%/obs-studio/.sentinel``).
+
+    Created at launch, removed only on a clean exit. If it survives, every later start shows "Crash Detected —
+    run in safe mode?", which blocks the WebSocket server while nobody is watching the screen.
+    """
+    base = Path(appdata) if appdata is not None else Path(os.environ.get("APPDATA", ""))
+    return base / "obs-studio" / ".sentinel"
+
+
+def clear_crash_flag(appdata: str | Path | None = None) -> bool:
+    """Delete a stale crash marker so the next launch goes straight to the normal UI."""
+    if is_obs_running():
+        log.debug("OBS is running; leaving .sentinel alone")
+        return False
+    path = crash_flag_path(appdata)
+    if not path.exists():
+        return False
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError as exc:
+        log.warning("could not clear %s: %s", path, exc)
+        return False
+    log.info("cleared the OBS crash marker; the next launch skips the safe-mode prompt")
+    return True
 
 
 def wait_for_websocket(

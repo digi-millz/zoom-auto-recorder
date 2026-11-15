@@ -13,18 +13,19 @@ import os
 import secrets
 import subprocess
 import sys
-import threading
 import time
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime
-from http import HTTPStatus
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+import recurrence
+import zoom_account
+from defaults import DEFAULT_TZ
 from obs_controller import is_websocket_reachable
-from scheduler import ScheduleError
+from scheduler import ScheduleError, parse_start
 from store import RunnerLock, ScheduleStore, StoreError, request_stop
 
 log = logging.getLogger(__name__)
@@ -51,12 +52,53 @@ def _obs_reachable(state: UiState) -> bool:
     return reachable
 
 
+def resolve_output_dir(raw: str) -> Path:
+    """Validate a user-supplied recordings folder, creating it if needed."""
+    text = raw.strip().strip('"').strip("'")
+    if not text:
+        raise ValueError("a folder is required")
+    path = Path(os.path.expandvars(os.path.expanduser(text)))
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    path = path.resolve()
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"{path} is a file, not a folder")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"cannot create {path}: {exc}") from exc
+    return path
+
+
+def output_dir_for(state: UiState, store: ScheduleStore) -> Path:
+    """Recordings folder from the schedule file, falling back to the CLI argument."""
+    configured = store.settings.get("output_dir")
+    if not configured:
+        return state.output_dir
+    try:
+        return Path(configured).expanduser().resolve()
+    except OSError:
+        return state.output_dir
+
+
+
+def default_email(state: UiState, store: ScheduleStore) -> str:
+    """Saved setting, then anything explicit in Zoom's config — empty when nothing is configured.
+
+    ``state`` is unused but keeps the call signature symmetrical with :func:`output_dir_for`.
+    """
+    return store.setting("email") or zoom_account.discover() or ""
+
+
 def status_payload(state: UiState) -> dict:
     store = ScheduleStore(state.schedule_path)
     pending = store.pending()
     return {
         "schedule": str(store.path),
-        "output_dir": str(state.output_dir),
+        "output_dir": str(output_dir_for(state, store)),
+        "default_output_dir": str(state.output_dir),
+        "default_tz": DEFAULT_TZ,
+        "default_email": default_email(state, store),
         "runner_pid": RunnerLock(store.path).owner_pid(),
         "obs_reachable": _obs_reachable(state),
         "obs_port": state.obs_port,
@@ -66,11 +108,49 @@ def status_payload(state: UiState) -> dict:
     }
 
 
+def preview_payload(payload: dict) -> dict:
+    """Next occurrences for the form's repeat builder (server-side, so the maths is the real maths)."""
+    start = str(payload.get("start") or "").strip()
+    tz = str(payload.get("tz") or "").strip() or None
+    spec = str(payload.get("rrule") or "").strip()
+    try:
+        count = max(1, min(10, int(payload.get("count") or 5)))
+    except (TypeError, ValueError):
+        count = 5
+    if not start:
+        raise ScheduleError("a start date and time are required")
+    if not spec:
+        return {"occurrences": [], "summary": "", "count": 0}
+    start_dt = parse_start(start)
+    # Preview from "now" when the series already began, otherwise from its first occurrence.
+    anchor = min(datetime.now(), start_dt) - timedelta(seconds=1)
+    moments = recurrence.occurrences(spec, start, tz, count=count, after=anchor)
+    return {
+        "occurrences": [moment.strftime("%Y-%m-%d %H:%M") for moment in moments],
+        "summary": recurrence.describe(spec, tz),
+        "count": len(moments),
+        "rrule": spec,
+        "tz": tz,
+    }
+
+
+def log_tail(path: Path, lines: int = 200) -> str:
+    """Last *lines* lines of the runner log (missing file is not an error)."""
+    try:
+        if not path.exists():
+            return ""
+        data = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"(cannot read {path}: {exc})"
+    return "\n".join(data[-max(1, lines) :])
+
+
 def start_runner(state: UiState) -> int:
     owner = RunnerLock(state.schedule_path).owner_pid()
     if owner:
         raise RuntimeError(f"runner already running (pid {owner})")
 
+    folder = output_dir_for(state, ScheduleStore(state.schedule_path))
     command = [
         sys.executable,
         str(_PROJECT_ROOT / "main.py"),
@@ -78,7 +158,7 @@ def start_runner(state: UiState) -> int:
         "--schedule",
         str(state.schedule_path),
         "--output-dir",
-        str(state.output_dir),
+        str(folder),
         "--log-file",
         str(state.log_file),
         "--obs-port",
@@ -191,7 +271,8 @@ class UiHandler(BaseHTTPRequestHandler):
     # -- routes ------------------------------------------------------------ #
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib signature
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path in ("/", "/index.html"):
             if not self._guard(need_token=False):
                 return
@@ -203,6 +284,18 @@ class UiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, status_payload(self.state))
             except StoreError as exc:
                 self._send_json(500, {"error": str(exc)})
+        elif path == "/api/log":
+            if not self._guard():
+                return
+            query = parse_qs(parsed.query)
+            try:
+                wanted = int((query.get("lines") or ["200"])[0])
+            except ValueError:
+                wanted = 200
+            self._send_json(
+                200,
+                {"path": str(self.state.log_file), "text": log_tail(self.state.log_file, wanted)},
+            )
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -222,6 +315,15 @@ class UiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/entries":
             self._add_entry(payload)
+        elif path.startswith("/api/entries/"):
+            self._update_entry(path[len("/api/entries/") :], payload)
+        elif path == "/api/preview":
+            try:
+                self._send_json(200, preview_payload(payload))
+            except (ScheduleError, ValueError) as exc:
+                self._send_json(400, {"error": str(exc)})
+        elif path == "/api/settings":
+            self._set_settings(payload)
         elif path == "/api/runner/start":
             try:
                 self._send_json(200, {"pid": start_runner(self.state)})
@@ -231,6 +333,7 @@ class UiHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"stopped": stop_runner(self.state)})
         else:
             self._send_json(404, {"error": "not found"})
+        return
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib signature
         path = urlparse(self.path).path
@@ -258,9 +361,12 @@ class UiHandler(BaseHTTPRequestHandler):
         when = str(payload.get("when") or "").strip()
         note = str(payload.get("note") or "").strip()
         output_dir = str(payload.get("output_dir") or "").strip() or None
+        email = str(payload.get("email") or "").strip() or None
         repeat = (str(payload.get("repeat") or "").strip().lower() or None)
         if repeat in ("none", "once"):
             repeat = None
+        rrule = str(payload.get("rrule") or "").strip() or None
+        tz = str(payload.get("tz") or "").strip() or None
 
         if not url:
             self._send_json(400, {"error": "url is required"})
@@ -269,22 +375,88 @@ class UiHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "date and time are required"})
             return
         try:
-            entry = ScheduleStore(self.state.schedule_path).add(
+            store = ScheduleStore(self.state.schedule_path)
+            entry = store.add(
                 url=url,
                 start_at=when,
                 output_dir=output_dir,
                 note=note,
+                email=email,
                 repeat=repeat,
+                rrule=rrule,
+                tz=tz,
             )
         except (ScheduleError, StoreError, ValueError) as exc:
             self._send_json(400, {"error": str(exc)})
             return
         self._send_json(201, {"entry": entry.to_dict()})
 
+    def _update_entry(self, entry_id: str, payload: dict) -> None:
+        """Edit an existing entry. Only the supplied fields change; ``""`` clears an optional one."""
+        fields: dict[str, object] = {}
+        for key in ("url", "note", "email", "output_dir", "tz", "rrule", "repeat"):
+            if key in payload:
+                fields[key] = payload[key]
+        when = str(payload.get("when") or "").strip()
+        if when:
+            fields["start_at"] = when
+        if not fields:
+            self._send_json(400, {"error": "nothing to update"})
+            return
+        try:
+            entry = ScheduleStore(self.state.schedule_path).update(entry_id, **fields)
+        except (ScheduleError, StoreError, ValueError) as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        if entry is None:
+            self._send_json(404, {"error": f"no entry {entry_id}"})
+            return
+        log.info("entry %s updated", entry.id)
+        self._send_json(200, {"entry": entry.to_dict()})
+
+
+    def _set_settings(self, payload: dict) -> None:
+        """Update persisted settings: the recordings folder and/or the Zoom prejoin email."""
+        updated: dict[str, str] = {}
+        if payload.get("output_dir") is not None:
+            try:
+                updated["output_dir"] = str(resolve_output_dir(str(payload["output_dir"])))
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+        if payload.get("email") is not None:
+            address = str(payload["email"]).strip()
+            if address and ("@" not in address or address.endswith("@")):
+                self._send_json(400, {"error": f"{address!r} is not an email address"})
+                return
+            updated["email"] = address
+        if not updated:
+            self._send_json(400, {"error": "nothing to update"})
+            return
+        try:
+            store = ScheduleStore(self.state.schedule_path)
+            for key, value in updated.items():
+                store.set_setting(key, value)
+        except StoreError as exc:
+            self._send_json(500, {"error": str(exc)})
+            return
+        log.info("settings updated: %s", ", ".join(sorted(updated)))
+        self._send_json(
+            200,
+            {
+                "output_dir": str(output_dir_for(self.state, store)),
+                "email": default_email(self.state, store),
+                "updated": sorted(updated),
+            },
+        )
+
 
 class UiServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Windows happily binds a second listener to the same port when SO_REUSEADDR is set, and each server has its
+    # own token — requests then hit a random one and every other call fails with "missing or invalid token".
+    # Refusing the address makes the second launch fail loudly instead.
+    allow_reuse_address = False
 
     def __init__(self, address: tuple[str, int], state: UiState):
         self.state = state
@@ -322,14 +494,21 @@ def serve(
     port: int = 8765,
     open_browser: bool = True,
 ) -> None:
-    server = make_server(
-        schedule_path=schedule_path,
-        output_dir=output_dir,
-        log_file=log_file,
-        obs_port=obs_port,
-        host=host,
-        port=port,
-    )
+    try:
+        server = make_server(
+            schedule_path=schedule_path,
+            output_dir=output_dir,
+            log_file=log_file,
+            obs_port=obs_port,
+            host=host,
+            port=port,
+        )
+    except OSError as exc:
+        raise SystemExit(
+            f"cannot listen on {host}:{port} ({exc}).\n"
+            f"Another recorder UI is probably already running — open "
+            f"http://{host}:{port}/ , or start this one with --port {port + 1}."
+        ) from exc
     url = f"http://{host}:{server.server_address[1]}/"
     print(f"zoom recorder UI: {url}  (Ctrl+C to stop)")
     if open_browser:

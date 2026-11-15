@@ -1,7 +1,6 @@
 import tempfile
 import unittest
 from pathlib import Path
-from datetime import datetime
 
 import cli
 
@@ -58,6 +57,41 @@ class DiskPreflightTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, cli.EXIT_DISK)
 
+
+class RecordingNameTests(unittest.TestCase):
+    def test_generic_window_title_falls_back_to_the_meeting_id(self) -> None:
+        # The waiting room and webinar windows are both titled "Zoom Workplace" / "Zoom Webinar".
+        self.assertEqual(
+            cli._recording_title("Zoom Workplace", "https://us06web.zoom.us/j/85330823611"),
+            "zoom-85330823611",
+        )
+        self.assertEqual(
+            cli._recording_title("Zoom Webinar", "https://zoom.us/j/81234567890?pwd=abc"),
+            "zoom-81234567890",
+        )
+
+    def test_real_topic_is_kept(self) -> None:
+        self.assertEqual(
+            cli._recording_title("Live Chart Watching", "https://us06web.zoom.us/j/85330823611"),
+            "Live Chart Watching",
+        )
+
+    def test_unparseable_link_still_names_the_file(self) -> None:
+        self.assertEqual(cli._recording_title("", "https://example.com/whatever"), "meeting")
+
+
+class WaitingRoomTimeoutTests(unittest.TestCase):
+    def test_zero_timeout_waits_forever(self) -> None:
+        self.assertFalse(cli.waiting_room_expired(0.0, 99999.0, 0))
+
+    def test_still_within_the_window(self) -> None:
+        self.assertFalse(cli.waiting_room_expired(100.0, 150.0, 60.0))
+
+    def test_expires_at_the_limit(self) -> None:
+        self.assertTrue(cli.waiting_room_expired(100.0, 160.0, 60.0))
+
+    def test_not_in_the_waiting_room_is_never_expired(self) -> None:
+        self.assertFalse(cli.waiting_room_expired(None, 99999.0, 60.0))
 
 if __name__ == "__main__":
     unittest.main()

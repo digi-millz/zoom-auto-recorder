@@ -4,7 +4,6 @@ import unittest
 from window_manager import (
     WindowInfo,
     select_meeting_window,
-    select_prompt_window,
     to_zoommtg,
 )
 
@@ -75,24 +74,6 @@ class SelectMeetingWindowTests(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.hwnd, SECOND_FRAME.hwnd)
-
-
-class PromptWindowTests(unittest.TestCase):
-    def test_disclosure_dialog_is_selected(self):
-        dialog = WindowInfo(11, 10, "Disclosure", "zRichMsgBoxClass", True, 500, 200)
-        meeting = WindowInfo(12, 10, "Zoom Meeting", "ConfMultiTabContentWndClass", True, 900, 600)
-        match = select_prompt_window([meeting, dialog], meeting.hwnd)
-        self.assertIsNotNone(match)
-        assert match is not None
-        self.assertEqual(match.hwnd, 11)
-
-    def test_meeting_window_is_never_a_prompt(self):
-        meeting = WindowInfo(12, 10, "Zoom Meeting", "ConfMultiTabContentWndClass", True, 900, 600)
-        self.assertIsNone(select_prompt_window([meeting], meeting.hwnd))
-
-    def test_waiting_room_is_not_a_prompt(self):
-        waiting = WindowInfo(13, 10, "Zoom Workplace", "zWaitingRoomWndClass", True, 800, 500)
-        self.assertIsNone(select_prompt_window([waiting]))
 
 
 class WindowOverrideTests(unittest.TestCase):

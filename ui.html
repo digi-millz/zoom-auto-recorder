@@ -74,6 +74,19 @@
     border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; width: 100%;
   }
   .row { display: grid; grid-template-columns: 1fr 110px; gap: 10px; }
+  .row.tz-row { grid-template-columns: 1fr 178px; }
+  [hidden] { display: none !important; }
+  .card.wide { grid-column: 1 / -1; }
+  #out-form { justify-items: start; }
+  .settings-row { grid-template-columns: 1fr 1fr; }
+  #out-form button { justify-self: start; }
+  code { font-size: 11px; background: var(--bg); border: 1px solid var(--border);
+         border-radius: 4px; padding: 0 4px; }
+  .days { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .days label { display: flex; align-items: center; gap: 4px; }
+  pre { margin: 0; max-height: 280px; overflow: auto; background: var(--bg);
+        border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+        font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
   .hint { color: var(--muted); font-size: 12px; margin: 12px 0 0; }
   .entries { margin: 18px 22px 30px; max-width: 1180px; }
   .entries-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
@@ -138,18 +151,110 @@
         <input type="text" id="f-url" placeholder="https://us06web.zoom.us/j/85091120436" required>
       </label>
       <label>Note <input type="text" id="f-note" placeholder="optional"></label>
-      <label>Repeat
-        <select id="f-repeat">
-          <option value="none">once</option>
-          <option value="weekly">weekly</option>
-          <option value="weekdays">weekdays (Mon-Fri)</option>
-        </select>
+      <div class="row tz-row">
+        <label>Repeats
+          <select id="f-freq">
+            <option value="once">once</option>
+            <option value="daily">daily</option>
+            <option value="weekly">weekly</option>
+            <option value="biweekly">every 2 weeks</option>
+            <option value="monthly">monthly</option>
+            <option value="custom" hidden>custom rule</option>
+          </select>
+        </label>
+        <label>Timezone
+          <select id="f-tz">
+            <option value="America/New_York" selected>Eastern (New York)</option>
+            <option value="America/Chicago">Central (Chicago)</option>
+            <option value="America/Denver">Mountain (Denver)</option>
+            <option value="America/Phoenix">Arizona (Phoenix)</option>
+            <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+            <option value="America/Anchorage">Alaska (Anchorage)</option>
+            <option value="Pacific/Honolulu">Hawaii (Honolulu)</option>
+            <option value="America/Toronto">Toronto</option>
+            <option value="America/Mexico_City">Mexico City</option>
+            <option value="America/Sao_Paulo">São Paulo</option>
+            <option value="UTC">UTC</option>
+            <option value="Europe/London">London</option>
+            <option value="Europe/Berlin">Berlin</option>
+            <option value="Europe/Madrid">Madrid</option>
+            <option value="Europe/Warsaw">Warsaw</option>
+            <option value="Europe/Moscow">Moscow</option>
+            <option value="Asia/Dubai">Dubai</option>
+            <option value="Asia/Kolkata">India (Kolkata)</option>
+            <option value="Asia/Singapore">Singapore</option>
+            <option value="Asia/Hong_Kong">Hong Kong</option>
+            <option value="Asia/Tokyo">Tokyo</option>
+            <option value="Australia/Sydney">Sydney</option>
+            <option value="Pacific/Auckland">Auckland</option>
+          </select>
+        </label>
+      </div>
+      <div class="days" id="f-days">
+        <label><input type="checkbox" class="wd" value="MO"> Mon</label>
+        <label><input type="checkbox" class="wd" value="TU"> Tue</label>
+        <label><input type="checkbox" class="wd" value="WE"> Wed</label>
+        <label><input type="checkbox" class="wd" value="TH"> Thu</label>
+        <label><input type="checkbox" class="wd" value="FR"> Fri</label>
+        <label><input type="checkbox" class="wd" value="SA"> Sat</label>
+        <label><input type="checkbox" class="wd" value="SU"> Sun</label>
+      </div>
+      <div class="row" id="f-endrow">
+        <label>Ends
+          <select id="f-end">
+            <option value="never">never</option>
+            <option value="until">on a date</option>
+            <option value="count">after N times</option>
+          </select>
+        </label>
+        <label>&nbsp;<input type="date" id="f-until"></label>
+      </div>
+      <label id="f-countrow" hidden>Times <input type="number" id="f-count" min="1" max="99" value="10"></label>
+      <label id="f-rrule-row" hidden>Custom rule
+        <input type="text" id="f-rrule" placeholder="FREQ=MONTHLY;BYDAY=1WE" spellcheck="false">
       </label>
-      <button type="submit" class="primary">Add event</button>
+      <p class="hint" id="f-preview">No repeat selected.</p>
+      <label>Save this one to <input type="text" id="f-folder" placeholder="optional: overrides the folder below" spellcheck="false"></label>
+      <label>Zoom email
+        <input type="text" id="f-email" placeholder="default: set below" spellcheck="false">
+      </label>
+      <p class="hint">Only used if Zoom asks "Enter your email and name" before the meeting.</p>
+      <div class="actions">
+        <button type="submit" class="primary" id="btn-save">Add event</button>
+        <button type="button" id="btn-cancel" hidden>Cancel edit</button>
+      </div>
     </form>
     <p class="hint">Adding an event schedules it; the runner must be running for a
       recording to happen. It waits for future events and records each one until the
       Zoom meeting window closes.</p>
+  </section>
+
+  <section class="card wide" id="settings-card">
+    <h2>Settings</h2>
+    <form id="out-form">
+      <div class="row settings-row">
+        <label>Save all recordings to
+          <input type="text" id="f-output" placeholder="D:\Meetings" spellcheck="false">
+        </label>
+        <label>Zoom email
+          <input type="text" id="s-email" placeholder="you@example.com" spellcheck="false">
+        </label>
+      </div>
+      <button type="submit" class="primary">Save settings</button>
+    </form>
+    <p class="hint">Where finished <code>.mp4</code> files go (a relative path resolves against the app
+      folder; it is created if missing; events that set their own folder ignore it), and the address typed into
+      Zoom's "Enter your email and name" prompt. Currently: <b id="out-current">…</b> ·
+      email <b id="email-current">…</b></p>
+  </section>
+
+  <section class="card wide" id="log-card">
+    <div class="entries-head">
+      <h2>Runner log</h2>
+      <label><input type="checkbox" id="log-follow" checked> follow</label>
+      <code id="log-path"></code>
+    </div>
+    <pre id="log-pre">run the runner to see activity here.</pre>
   </section>
 </main>
 
@@ -315,6 +420,13 @@ function renderEntries() {
     const when = document.createElement("td");
     when.className = "when";
     when.textContent = entry.start;
+    const repeatText = entry.rrule || entry.repeat || "";
+    if (repeatText) {
+      const badge = document.createElement("small");
+      badge.textContent = ` ↻ ${repeatText}`;
+      badge.title = entry.tz ? `${repeatText} (${entry.tz})` : repeatText;
+      when.appendChild(badge);
+    }
 
     const status = document.createElement("td");
     status.appendChild(statusPill(entry.status));
@@ -338,24 +450,76 @@ function renderEntries() {
     file.title = entry.last_path || "";
 
     const actions = document.createElement("td");
+    const edit = document.createElement("button");
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => startEdit(entry));
     const remove = document.createElement("button");
     remove.textContent = "Remove";
     remove.addEventListener("click", () => removeEntry(entry.id));
-    actions.appendChild(remove);
+    actions.append(edit, remove);
 
     tr.append(when, status, note, link, file, actions);
     rows.appendChild(tr);
   }
 }
 
+// The token is baked in per launch, so a UI restart invalidates every open tab. Reload once to pick up the new
+// page instead of toasting "invalid token" every five seconds forever.
+function reloadForNewToken() {
+  const now = Date.now();
+  const last = Number(sessionStorage.getItem("tokenReloadAt") || 0);
+  if (now - last < 10000) return;
+  sessionStorage.setItem("tokenReloadAt", String(now));
+  toast("The UI was restarted — reloading to pick up the new token…");
+  setTimeout(() => location.reload(), 600);
+}
+
+// The server owns the default zone (America/New_York); apply it once, never over a choice the user made.
+let tzApplied = false;
+function applyDefaultTz() {
+  if (tzApplied || !snapshot) return;
+  tzApplied = true;
+  const select = $("f-tz");
+  const wanted = snapshot.default_tz;
+  if (wanted && [...select.options].some((option) => option.value === wanted)) {
+    select.value = wanted;
+  }
+}
+
 async function api(path, options) {
   const opts = Object.assign({}, options || {});
   opts.headers = Object.assign({}, opts.headers || {}, { "X-Auth-Token": TOKEN });
+  // Every POST carries JSON; the server rejects anything else with 415 (this is why Start/Stop used to no-op).
+  if (opts.body && !opts.headers["Content-Type"]) {
+    opts.headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(path, opts);
+  if (response.status === 401) {
+    reloadForNewToken();
+    throw new Error("UI token expired — reloading");
+  }
   let payload = {};
   try { payload = await response.json(); } catch (err) { /* empty body */ }
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   return payload;
+}
+
+function renderPaths() {
+  if (!snapshot) return;
+  const folder = snapshot.output_dir || "";
+  const email = snapshot.default_email || "";
+  if ($("out-current")) $("out-current").textContent = folder;
+  if ($("email-current")) $("email-current").textContent = email || "not set";
+  const folderInput = $("f-output");
+  if (folderInput && document.activeElement !== folderInput && !folderInput.dataset.dirty) {
+    folderInput.value = folder;
+  }
+  const emailInput = $("s-email");
+  if (emailInput && document.activeElement !== emailInput && !emailInput.dataset.dirty) {
+    emailInput.value = email;
+  }
+  // The per-event field stays empty (it is an override); its placeholder shows what will be used.
+  if ($("f-email")) $("f-email").placeholder = email ? `default: ${email}` : "used only if Zoom asks";
 }
 
 async function refresh() {
@@ -364,36 +528,243 @@ async function refresh() {
     renderChips();
     renderCalendar();
     renderEntries();
+    renderPaths();
+    applyDefaultTz();
+    renderLog();
   } catch (err) {
     toast(err.message);
   }
 }
 
+let editingId = null;
+
+function exitEdit() {
+  editingId = null;
+  $("btn-save").textContent = "Add event";
+  $("btn-cancel").hidden = true;
+  $("f-url").value = "";
+  $("f-note").value = "";
+  $("f-email").value = "";
+  $("f-folder").value = "";
+  $("f-rrule").value = "";
+  $("f-freq").value = "once";
+  document.querySelectorAll(".wd").forEach((box) => { box.checked = false; });
+  $("f-end").value = "never";
+  $("f-until").value = "";
+  updateRepeatUI();
+}
+
+function startEdit(entry) {
+  editingId = entry.id;
+  const [date, time] = (entry.start || "").split(" ");
+  $("f-date").value = date || "";
+  $("f-time").value = time || "10:00";
+  $("f-url").value = entry.url || "";
+  $("f-note").value = entry.note || "";
+  $("f-email").value = entry.email || "";
+  $("f-folder").value = entry.output_dir || "";
+  if (entry.tz && [...$("f-tz").options].some((option) => option.value === entry.tz)) {
+    $("f-tz").value = entry.tz;
+  }
+  const parsed = parseRule(entry.rrule || "");
+  document.querySelectorAll(".wd").forEach((box) => {
+    box.checked = !!(parsed && parsed.days && parsed.days.includes(box.value));
+  });
+  if (parsed) {
+    $("f-freq").value = parsed.freq;
+    $("f-end").value = parsed.end;
+  } else {
+    $("f-freq").value = "custom";
+    $("f-rrule").value = entry.rrule || "";
+    $("f-end").value = "never";
+  }
+  $("f-until").value = "";
+  $("btn-save").textContent = "Save changes";
+  $("btn-cancel").hidden = false;
+  updateRepeatUI();
+  $("f-url").focus();
+  toast(`editing ${entry.start} — Save changes or Cancel`);
+}
+
 async function removeEntry(id) {
   if (!confirm("Remove this scheduled event?")) return;
   try {
+    if (editingId === id) exitEdit();
     await api(`/api/entries/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (err) {
     toast(err.message);
   }
 }
 
+$("btn-cancel").addEventListener("click", exitEdit);
+
+const DAY_LABELS = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+
+// Rules the builder cannot express are edited as raw text (RRULE is data; do not pretend to understand it).
+function buildRule() {
+  const freq = $("f-freq").value;
+  if (freq === "once") return "";
+  if (freq === "custom") return $("f-rrule").value.trim();
+  const parts = [];
+  if (freq === "daily") parts.push("FREQ=DAILY");
+  if (freq === "monthly") parts.push("FREQ=MONTHLY");
+  if (freq === "weekly") parts.push("FREQ=WEEKLY");
+  if (freq === "biweekly") parts.push("FREQ=WEEKLY;INTERVAL=2");
+  const days = [...document.querySelectorAll(".wd:checked")].map((box) => box.value);
+  if (days.length && (freq === "weekly" || freq === "biweekly")) {
+    parts.push(`BYDAY=${days.join(",")}`);
+  }
+  const end = $("f-end").value;
+  if (end === "until" && $("f-until").value) {
+    parts.push(`UNTIL=${$("f-until").value.replace(/-/g, "")}T235959`);
+  }
+  if (end === "count" && Number($("f-count").value) > 0) {
+    parts.push(`COUNT=${$("f-count").value}`);
+  }
+  return parts.join(";");
+}
+
+// Reverse of buildRule() for the shapes it can emit; anything else becomes "custom".
+function parseRule(spec) {
+  if (!spec) return { freq: "once" };
+  const up = spec.toUpperCase();
+  const freqMatch = /FREQ=(DAILY|WEEKLY|MONTHLY)/.exec(up);
+  if (!freqMatch) return null;
+  const interval = Number((/INTERVAL=(\d+)/.exec(up) || [0, "1"])[1]);
+  let freq = { DAILY: "daily", WEEKLY: "weekly", MONTHLY: "monthly" }[freqMatch[1]];
+  if (freq === "weekly" && interval === 2) freq = "biweekly";
+  if (freq === "weekly" && interval !== 1) return null;
+  const state = { freq, days: [], end: "never" };
+  const days = /BYDAY=([A-Z,]+)/.exec(up);
+  if (days) state.days = days[1].split(",");
+  if (/UNTIL=/.test(up)) state.end = "until";
+  if (/COUNT=/.test(up)) state.end = "count";
+  // Reject anything the builder would silently drop.
+  const known = /^(?:FREQ=[A-Z]+|INTERVAL=\d+|BYDAY=[A-Z,]+|UNTIL=[0-9TZ]+|COUNT=\d+)(?:;|$)/;
+  if (!up.split(";").every((part) => known.test(part))) return null;
+  return state;
+}
+
+function updateRepeatUI() {
+  const freq = $("f-freq").value;
+  $("f-days").hidden = !(freq === "weekly" || freq === "biweekly");
+  $("f-endrow").hidden = freq === "once" || freq === "custom";
+  $("f-rrule-row").hidden = freq !== "custom";
+  $("f-countrow").hidden = $("f-end").value !== "count";
+  $("f-until").closest("label").hidden = $("f-end").value !== "until";
+  schedulePreview();
+}
+
+let previewTimer = null;
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(renderPreview, 350);
+}
+
+async function renderPreview() {
+  const rrule = buildRule();
+  const node = $("f-preview");
+  if (!rrule) { node.textContent = "No repeat selected."; return; }
+  const start = `${$("f-date").value} ${$("f-time").value}`;
+  try {
+    const data = await api("/api/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ start, tz: $("f-tz").value.trim() || null, rrule }),
+    });
+    if (!data.occurrences.length) {
+      node.textContent = `${data.summary || rrule} — no further occurrences.`;
+      return;
+    }
+    node.innerHTML = `${data.summary} — next in this machine's time zone: <b>${data.occurrences.join(" · ")}</b>`;
+  } catch (err) {
+    node.textContent = err.message;
+  }
+}
+
+async function renderLog() {
+  if (!$("log-follow").checked) return;
+  try {
+    const data = await api("/api/log?lines=250");
+    $("log-path").textContent = data.path || "";
+    const pre = $("log-pre");
+    if (pre.textContent !== data.text) {
+      pre.textContent = data.text || "no log output yet.";
+      pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (err) { /* the log is not worth a toast per poll */ }
+}
+
+for (const id of ["f-freq", "f-end", "f-until", "f-count", "f-tz", "f-date", "f-time"]) {
+  $(id).addEventListener("input", updateRepeatUI);
+  $(id).addEventListener("change", updateRepeatUI);
+}
+for (const box of document.querySelectorAll(".wd")) {
+  box.addEventListener("change", schedulePreview);
+}
+$("f-end").addEventListener("change", schedulePreview);
+
 $("add-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const when = `${$("f-date").value} ${$("f-time").value}`;
+  const body = JSON.stringify({
+    when,
+    url: $("f-url").value.trim(),
+    note: $("f-note").value.trim(),
+    rrule: buildRule(),
+    tz: $("f-tz").value.trim() || null,
+    output_dir: $("f-folder").value.trim() || null,
+    email: $("f-email").value.trim() || null,
+  });
   try {
+    if (editingId) {
+      await api(`/api/entries/${encodeURIComponent(editingId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      toast("changes saved");
+      exitEdit();
+      await refresh();
+      return;
+    }
     await api("/api/entries", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        when,
-        url: $("f-url").value.trim(),
-        note: $("f-note").value.trim(),
-        repeat: $("f-repeat").value,
-      }),
+      body,
     });
     $("f-url").value = "";
     $("f-note").value = "";
+    $("f-email").value = "";
+    $("f-folder").value = "";
+    await refresh();
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+$("f-output").addEventListener("input", (event) => {
+  event.target.dataset.dirty = "1";
+});
+
+$("s-email").addEventListener("input", (event) => {
+  event.target.dataset.dirty = "1";
+});
+
+$("out-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const result = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        output_dir: $("f-output").value.trim(),
+        email: $("s-email").value.trim(),
+      }),
+    });
+    delete $("f-output").dataset.dirty;
+    delete $("s-email").dataset.dirty;
+    toast(`saved — recordings to ${result.output_dir}, email ${result.email || "not set"}`);
     await refresh();
   } catch (err) {
     toast(err.message);
@@ -416,6 +787,7 @@ $("cal-today").addEventListener("click", () => { view = new Date(); view.setDate
 $("show-all").addEventListener("change", renderEntries);
 
 if (!$("f-date").value) $("f-date").value = ymd(new Date());
+updateRepeatUI();
 refresh();
 setInterval(refresh, 5000);
 setInterval(updateEta, 1000);

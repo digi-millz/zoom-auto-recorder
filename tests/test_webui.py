@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -131,6 +132,137 @@ class WebUiTests(unittest.TestCase):
         status, body = self.request("/api/runner/stop", method="POST", payload={})
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"stopped": False})
+
+    def test_status_exposes_the_default_zone(self):
+        _status, body = self.request("/api/status")
+        payload = json.loads(body)
+        self.assertEqual(payload["default_tz"], "America/New_York")
+        self.assertIn("output_dir", payload)
+
+    def test_no_email_is_configured_out_of_the_box(self) -> None:
+        # There is deliberately no address baked into the source.
+        _status, body = self.request("/api/status")
+        self.assertEqual(json.loads(body)["default_email"], "")
+
+    def test_settings_store_the_zoom_email(self) -> None:
+        status, body = self.request(
+            "/api/settings", method="POST", payload={"email": "me@example.com"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["email"], "me@example.com")
+        _status, state = self.request("/api/status")
+        self.assertEqual(json.loads(state)["default_email"], "me@example.com")
+
+    def test_an_entry_keeps_its_own_email(self) -> None:
+        self.request(
+            "/api/entries",
+            method="POST",
+            payload={
+                "when": "2026-11-18 10:00",
+                "url": "https://zoom.us/j/1",
+                "email": "guest@example.com",
+            },
+        )
+        _status, body = self.request("/api/status")
+        self.assertEqual(json.loads(body)["entries"][0]["email"], "guest@example.com")
+
+    def test_garbage_email_is_rejected(self) -> None:
+        code, _body = self.request_error(
+            "/api/settings", method="POST", payload={"email": "not-an-email"}
+        )
+        self.assertEqual(code, 400)
+        code, _body = self.request_error(
+            "/api/entries",
+            method="POST",
+            payload={"when": "2026-11-18 10:00", "url": "https://zoom.us/j/1", "email": "bad"},
+        )
+        self.assertEqual(code, 400)
+
+    def test_preview_returns_occurrences_for_a_rule(self):
+        status, body = self.request(
+            "/api/preview",
+            method="POST",
+            payload={
+                "start": "2026-11-18 10:00",
+                "tz": "America/New_York",
+                "rrule": "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE",
+            },
+        )
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["occurrences"]), 5)
+        self.assertIn("America/New_York", payload["summary"])
+        days = [date.fromisoformat(moment[:10]) for moment in payload["occurrences"]]
+        gaps = [(later - earlier).days for earlier, later in zip(days, days[1:])]
+        self.assertTrue(all(13 <= gap <= 15 for gap in gaps), gaps)
+
+    def test_preview_without_a_rule_is_empty(self):
+        status, body = self.request(
+            "/api/preview", method="POST", payload={"start": "2026-11-18 10:00", "rrule": ""}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["occurrences"], [])
+
+    def test_bad_zone_is_rejected(self):
+        code, body = self.request_error(
+            "/api/preview",
+            method="POST",
+            payload={"start": "2026-11-18 10:00", "tz": "Mars/Olympus", "rrule": "FREQ=DAILY"},
+        )
+        self.assertEqual(code, 400)
+        self.assertIn("timezone", body.lower())
+
+    def test_entry_keeps_its_zone_and_rule(self):
+        self.request(
+            "/api/entries",
+            method="POST",
+            payload={
+                "when": "2026-11-18 10:00",
+                "url": "https://zoom.us/j/123",
+                "rrule": "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE",
+                "tz": "America/New_York",
+            },
+        )
+        _status, body = self.request("/api/status")
+        entry = json.loads(body)["entries"][0]
+        self.assertEqual(entry["rrule"], "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE")
+        self.assertEqual(entry["tz"], "America/New_York")
+
+    def test_edit_an_entry(self) -> None:
+        _status, body = self.request(
+            "/api/entries",
+            method="POST",
+            payload={"when": "2026-11-18 10:00", "url": "https://zoom.us/j/1", "note": "typo"},
+        )
+        entry_id = json.loads(body)["entry"]["id"]
+        status, body = self.request(
+            f"/api/entries/{entry_id}",
+            method="POST",
+            payload={"when": "2026-11-19 12:00", "note": "fixed"},
+        )
+        self.assertEqual(status, 200)
+        entry = json.loads(body)["entry"]
+        self.assertEqual(entry["start"], "2026-11-19 12:00")
+        self.assertEqual(entry["note"], "fixed")
+        self.assertEqual(entry["url"], "https://zoom.us/j/1", "untouched fields survive")
+
+    def test_editing_an_unknown_entry_is_a_404(self) -> None:
+        code, _body = self.request_error(
+            "/api/entries/nosuchid", method="POST", payload={"note": "x"}
+        )
+        self.assertEqual(code, 404)
+
+    def test_a_bad_edit_is_a_400(self) -> None:
+        _status, body = self.request(
+            "/api/entries",
+            method="POST",
+            payload={"when": "2026-11-18 10:00", "url": "https://zoom.us/j/1"},
+        )
+        entry_id = json.loads(body)["entry"]["id"]
+        code, _body = self.request_error(
+            f"/api/entries/{entry_id}", method="POST", payload={"email": "nope"}
+        )
+        self.assertEqual(code, 400)
 
 
 if __name__ == "__main__":

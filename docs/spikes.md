@@ -1,0 +1,111 @@
+# Spike results (measured on this machine)
+
+Windows 11 26300, Zoom desktop (per-user install), OBS Studio 33.0.0, obs-websocket 5.7.6,
+Python 3.13.2, 96 DPI / 100 % scaling.
+
+## Zoom windows observed
+
+| Class | Meaning |
+| --- | --- |
+| `ZPPTMainFrmWndClassEx` | Zoom Workplace home window (not a meeting) |
+| `ConfMultiTabContentWndClass` | in-meeting window (Zoom Workplace 7.x) — title is the meeting topic |
+| `ZPMeetingMainWndClass` / `ZPContentViewWndClass` | older meeting frame classes |
+| `zWaitingRoomWndClass` | waiting room |
+| `zRichMsgBoxClass` | disclosure / consent / confirmation dialog |
+| `VideoPreviewWndClass` | pre-join preview with the Join button |
+| `ZPToolBarParentWndClass` | floating meeting toolbar (no client size; not capturable) |
+| `zoom_acc_notify_wnd`, `zoom_pt_*` | hidden notification helpers (no title) |
+
+## Capture: which method actually renders Zoom
+
+`PrintWindow(PW_RENDERFULLCONTENT)` — works, non-black, correct even when covered. This is what ``win_capture``
+uses for reading dialogs.
+
+OBS `window_capture` against a live Zoom window (luma max; 0 = black frame):
+
+| `window` value | priority | method 3 (WGC) | 2 (DXGI) | 1 (BitBlt) | 0 (auto) |
+| --- | --- | --- | --- | --- | --- |
+| `"Zoom Webinar"` (title only) | 0 | 0 | 0 | 0 | 0 |
+| `"ConfMultiTabContentWndClass"` (class only) | 1 | 0 | 0 | 0 | 0 |
+| `"Zoom.exe"` (exe only) | 2 | 0 | 0 | 0 | 0 |
+| `"Zoom Webinar:ConfMultiTabContentWndClass:Zoom.exe"` | 0 | **0** | **255** | **255** | **255** |
+
+Conclusions:
+
+1. The full `"title:class:exe"` composite is **required**; partial matches never resolve.
+2. **WGC cannot capture Zoom's CEF windows** — OBS's default "automatic" resolves to DXGI and works today, but the
+   method is pinned to 2 so a future default cannot silently land on the one that fails.
+3. DXGI and BitBlt returned identical content with another window raised over Zoom, so the capture stays on the
+   target window rather than the monitor. (Frozen-frame behaviour while fully covered is still unverified; the
+   watcher keeps the meeting window in front anyway.)
+
+## OCR
+
+`Windows.Media.Ocr` (en-US) works: 88 words off the Zoom home window, accurate boxes. Real UI text reads cleanly
+("Home / Calendar / Chat / Canvas / Scheduler / Settings / Search"), long labels occasionally split
+("The 9 30"), and proper nouns garble ("Jesse ogers") — which is why the matcher tolerates a 0.85 fuzzy ratio and
+matches whole lines rather than requiring exact strings.
+
+## OBS scene shape (verified against a live meeting, OBS 33.0.1)
+
+* window capture: `window_capture`, `window="<title>:<class>:Zoom.exe"`, `priority=0`, `method=2`,
+  `capture_mode="window"`, `cursor=False`
+* audio: `wasapi_process_output_capture` (Application Audio Capture) on the same composite → Zoom's output only
+* output: **Hybrid MP4** (this install's default) — playable even after a hard kill; no remux needed. mkv is
+  still handled by `postprocess.finalize`.
+* encoders present: NVENC H.264/HEVC, QSV H.264/HEVC, x264 (GTX 1060 + UHD 630). Recordings land at 1280x720 / 30 fps
+  because that is the active OBS profile's canvas, not the window size (1550x830).
+
+### End-to-end result (live webinar, 5.1 s)
+
+`scene.prepare` → `start_record` (confirmed active) → `stop_record` (path returned) → `postprocess.finalize`:
+
+```
+FINAL 2026-11-14_18-20_zoom-webinar.mp4 dur=5.1s size=3.93MB video=True audio=True remuxed=False
+audio: mean_volume -26.2 dB, max_volume -4.9 dB   # real signal, not silence
+```
+
+OBS wrote `simple_file_output` with `simple_aac` (160 kb/s stereo) + NVENC.
+
+## OBS crash/safe-mode trap
+
+OBS keeps an unclean-shutdown marker at `%APPDATA%\obs-studio\.sentinel` (a **directory**). While it exists, the
+next launch shows a modal **"OBS Studio Crash Detected — run in safe mode?"** and **the WebSocket server never
+starts**, i.e. the recorder silently fails while nobody is at the screen. A force-kill (`Stop-Process -Force`)
+guarantees it.
+
+`obs_controller.clear_crash_flag()` deletes it before launch (refusing while an `obs64.exe` is alive). Verified:
+after clearing, the WebSocket is up in 2 s and no dialog appears.
+
+## Dialog inventory (measured across four live joins)
+
+| Window class | Text seen | Action |
+| --- | --- | --- |
+| `zWaitingMeetingIDWndClass` | "Enter your email and name" | click the field placeholder, type the email, then **Join meeting** |
+| `zSimpleMessageDialogClass` | "Join new meeting? … leave this meeting" | **Leave & join** (only rule that leaves a call) |
+| `zRichMsgBoxClass` — "Disclosure" | "By clicking \"Agree\" and continuing…" | **Agree** — and the quoted word in the paragraph must lose to the button |
+| `VideoPreviewWndClass` | meeting topic + camera preview | **Join** |
+| `zWaitingRoomWndClass` | "Waiting for the host to start the meeting" | nothing (a meeting state, not a dialog) |
+| `ZDisclaimerBannerWndClass` | "This meeting is being recorded." | nothing (banner, no button) |
+| `zLeaveWndClass` | "Leave webinar" / "Cancel" | nothing automatic (guessing between Leave and End meeting is unsafe) |
+
+Dialog-sized OCR is fine (560x426 and 700x533 captures produced exact boxes); the quoted-label trap above was the
+only matching failure, fixed by ranking candidates on line word-count and vertical position.
+
+## Audio: the echo (measured)
+
+A recording sounded doubled. Cause: OBS mixes its **global** `Desktop Audio` device (whole system, which already
+contains Zoom) into every scene *in addition to* the per-process `Zoom audio` source. `scene.mute_global_audio()`
+mutes `Desktop Audio` and `Mic/Aux` on every run.
+
+Proof: playing a 440 Hz system tone and recording 5 s gave `mean_volume: -91.0 dB` (digital silence) with the
+globals muted, versus audible capture before. Zoom itself is still captured once, by the per-process source.
+
+## End-to-end runs observed
+
+| Link | Zoom's path | Outcome |
+| --- | --- | --- |
+| `…/89712840393` (already joined) | in-meeting | 40 s take, dialog watcher 1 click / 1 verified |
+| `…/85330823611` | Disclosure → prejoin → waiting room | 30 s take of the waiting room, host never admitted |
+| `…/89538600487` | prejoin → admitted | 21 s take of the real meeting ("Wealth Workshop") |
+| scheduled via UI | join → record → stop on window close | 111 s / 82 MB, exit 0, named `…_zoom-89712840393.mp4` |

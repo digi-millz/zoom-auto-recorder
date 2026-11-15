@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,10 +21,13 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+import zoom_account
+
 from obs_controller import (
     ObsConfig,
     ObsController,
     ObsError,
+    clear_crash_flag,
     find_obs_exe,
     find_recent_recording,
     is_obs_running,
@@ -60,7 +62,6 @@ from store import (
 )
 from window_manager import (
     WindowNotFound,
-    accept_prompt,
     close_window,
     current_meeting_window,
     iter_windows,
@@ -72,6 +73,13 @@ from window_manager import (
     to_zoommtg,
 )
 
+import dialogs
+import ocr
+import postprocess
+import scene
+import win_capture
+from watcher import DialogWatcher
+
 EXIT_OK = 0
 EXIT_OBS = 3
 EXIT_NO_WINDOW = 4
@@ -82,6 +90,8 @@ EXIT_DISK = 8
 
 DEFAULT_SCHEDULE = "./schedule.json"
 DEFAULT_OUTPUT = "./recordings"
+
+# Shared with the UI so the value shown and the value typed cannot drift apart.
 
 console = Console()
 log = logging.getLogger("recorder")
@@ -120,6 +130,31 @@ def _fail(code: int, message: str) -> NoReturn:
     raise click.exceptions.Exit(code)
 
 
+GENERIC_WINDOW_TITLES = {"zoom workplace", "zoom meeting", "zoom webinar", ""}
+
+
+def _recording_title(window_title: str, url: str) -> str:
+    """A name for the file: the meeting topic when Zoom exposes one, else the meeting id.
+
+    The waiting room and webinar windows are titled "Zoom Workplace" / "Zoom Webinar", which would name every
+    recording the same thing — the meeting id from the join link is stable and tells them apart.
+    """
+    title = (window_title or "").strip()
+    if title.lower() not in GENERIC_WINDOW_TITLES:
+        return title
+    target = to_zoommtg(url) or ""
+    match = re.search(r"confno=(\d+)", target)
+    return f"zoom-{match.group(1)}" if match else (title or "meeting")
+
+
+WAITING_ROOM_CLASS = "zWaitingRoomWndClass"
+
+
+def waiting_room_expired(entered: float | None, now: float, timeout: float) -> bool:
+    """True when we have been in Zoom's waiting room longer than *timeout* (0 = never)."""
+    return bool(timeout) and entered is not None and now - entered >= timeout
+
+
 def _monitor(
     controller: ObsController,
     max_duration: float,
@@ -127,23 +162,36 @@ def _monitor(
     should_stop: Callable[[], bool] = lambda: False,
     extra_classes: tuple[str, ...] = (),
     title_pattern=None,
+    on_window_change: Callable[[object], None] | None = None,
+    waiting_room_timeout: float = 0.0,
 ) -> int:
-    """Record until no Zoom meeting window remains for *close_grace* seconds.
+    """Record until the meeting window goes away for *close_grace* seconds.
 
-    Re-enumerates every second instead of trusting one HWND: Zoom recreates its
-    meeting window on screen-share/fullscreen changes, which would otherwise be
-    mistaken for the meeting ending.
+    Re-enumerates every second instead of trusting one HWND: Zoom recreates its meeting window on
+    screen-share/fullscreen changes, and the waiting room is replaced by the real meeting window on admission.
+    Both would otherwise leave OBS pointed at a window that no longer exists (black frames for the rest of the
+    recording), so a change is reported through *on_window_change*.
+
+    There is no time limit by default: the recording ends when the host closes the meeting. ``max_duration`` and
+    ``waiting_room_timeout`` are the two opt-in exceptions — the second one exists because a host who never starts
+    the meeting leaves us recording a waiting-room screen indefinitely.
     """
     started = time.monotonic()
     gone_since: float | None = None
+    waiting_since: float | None = None
+    current: tuple[int, str, str] | None = None
     while True:
         now = time.monotonic()
         if should_stop():
             log.info("stop requested; ending the recording")
             return EXIT_OK
-        if current_meeting_window(
+
+        window = current_meeting_window(
             extra_classes=extra_classes, title_pattern=title_pattern
-        ) is None:
+        )
+        if window is None:
+            current = None
+            waiting_since = None
             if find_process() is None:
                 log.info("Zoom process exited")
                 return EXIT_OK
@@ -158,6 +206,33 @@ def _monitor(
                 return EXIT_OK
         else:
             gone_since = None
+            identity = (window.hwnd, window.cls, window.title)
+            if identity != current:
+                current = identity
+                if on_window_change is not None:
+                    try:
+                        on_window_change(window)
+                    except Exception as exc:  # noqa: BLE001 - never end a recording over this
+                        log.warning("could not re-point the capture: %s", exc)
+
+            if window.cls == WAITING_ROOM_CLASS:
+                if waiting_since is None:
+                    waiting_since = now
+                    if waiting_room_timeout:
+                        log.info(
+                            "in Zoom's waiting room; giving the host up to %.0f min to admit us",
+                            waiting_room_timeout / 60,
+                        )
+                elif waiting_room_expired(waiting_since, now, waiting_room_timeout):
+                    log.warning(
+                        "still in the waiting room after %s; stopping the recording "
+                        "(the waiting-room window is left open — closing it opens Zoom's "
+                        "'End meeting or leave meeting?' dialog, which nobody should click blind)",
+                        format_delta(now - waiting_since),
+                    )
+                    return EXIT_OK
+            else:
+                waiting_since = None
 
         if max_duration and now - started >= max_duration:
             log.warning("maximum recording duration (%.0fs) reached", max_duration)
@@ -341,8 +416,10 @@ def _record_session(
     window_classes: tuple[str, ...] = (),
     window_title: str | None = None,
     passcode: str | None = None,
+    email: str | None = None,
     auto_accept: bool = False,
     auto_accept_seconds: float = 20.0,
+    waiting_room_timeout: float = 0.0,
 ) -> SessionResult:
     """Open the meeting, record it, stop when the window closes. Never raises Exit."""
     should_stop = should_stop or (lambda: False)
@@ -375,6 +452,8 @@ def _record_session(
         log.error("this tool drives the Windows Zoom client; Windows is required")
         return SessionResult(1)
 
+    # A stale .sentinel makes OBS open a "Crash Detected / safe mode" modal that blocks the WebSocket server.
+    clear_crash_flag()
     log.info("launching Zoom: %s", url)
     try:
         launch_meeting(url, mode=launch_mode, passcode=passcode)
@@ -382,18 +461,19 @@ def _record_session(
         log.error("could not launch Zoom: %s", exc)
         return SessionResult(1)
 
-    if auto_accept:
-        def _accept_loop() -> None:
-            deadline = time.monotonic() + auto_accept_seconds
-            while time.monotonic() < deadline:
-                prompt = accept_prompt()
-                if prompt is not None:
-                    log.info(
-                        "dismissed Zoom prompt %r (%s)", prompt.title, prompt.cls
-                    )
-                time.sleep(0.5)
-
-        threading.Thread(target=_accept_loop, daemon=True).start()
+    shots_dir = output_path / "_shots" / session_started.strftime("%Y%m%d-%H%M%S")
+    watcher = DialogWatcher(
+        dry_run=not auto_accept,
+        shots_dir=shots_dir,
+        email=email or zoom_account.discover(),
+        on_alert=lambda alert: log.error(
+            "needs_attention: unhandled Zoom dialog %s %r (shot: %s)",
+            alert.cls,
+            alert.title,
+            alert.screenshot or "none",
+        ),
+    )
+    watcher.start()
 
     try:
         window = find_meeting_window(
@@ -479,6 +559,12 @@ def _record_session(
             if not controller.ensure_record_dir(output_path):
                 log.warning("OBS keeps its configured recording directory")
             try:
+                scene.prepare(controller.call, window)
+            except Exception as exc:  # noqa: BLE001 - never block a recording on scene setup
+                log.warning(
+                    "could not configure the OBS scene (%s); recording whatever OBS has selected", exc
+                )
+            try:
                 controller.start_record()
             except ObsError as exc:
                 log.error("could not start the OBS recording: %s", exc)
@@ -494,7 +580,16 @@ def _record_session(
         if max_duration:
             log.info("recording until the meeting ends (safety cap %.0fs)", max_duration)
         else:
-            log.info("recording until the meeting ends")
+            log.info("recording until the host closes the meeting (no time limit)")
+
+        def repoint(new_window) -> None:
+            """Keep OBS pointed at the current meeting window (waiting room → meeting, recreations)."""
+            log.info(
+                "meeting window changed to %s (%r); re-pointing the OBS capture",
+                new_window.cls,
+                new_window.title,
+            )
+            scene.prepare(controller.call, new_window)
 
         exit_code = _monitor(
             controller,
@@ -503,6 +598,8 @@ def _record_session(
             should_stop,
             window_classes,
             title_pattern,
+            on_window_change=repoint,
+            waiting_room_timeout=waiting_room_timeout,
         )
     except KeyboardInterrupt:
         interrupted = True
@@ -512,6 +609,8 @@ def _record_session(
         else:
             log.info("interrupted; stopping the recording")
     finally:
+        watcher.stop()
+        log.info("dialog watcher: %s", watcher.summary())
         if not keep_recording and recording_started:
             reported: str | None = None
             try:
@@ -523,7 +622,24 @@ def _record_session(
                 controller, reported, output_path, session_started
             )
             if saved_path:
-                log.info("recording verified: %s", saved_path)
+                recording = postprocess.finalize(
+                    Path(saved_path),
+                    output_path,
+                    session_started,
+                    _recording_title(window.title, url),
+                )
+                saved_path = str(recording.path)
+                log.info(
+                    "recording ready: %s (%.0fs, %.1f MB, video=%s audio=%s%s)",
+                    recording.path,
+                    recording.duration_sec,
+                    recording.size_bytes / 1_000_000,
+                    recording.has_video,
+                    recording.has_audio,
+                    ", remuxed" if recording.remuxed else "",
+                )
+                if not recording.ok:
+                    exit_code = exit_code or EXIT_NO_FILE
             else:
                 log.error(
                     "no recording file found in %s or OBS's folder", output_path
@@ -578,10 +694,13 @@ def _session_options(func):
         ),
         click.option(
             "--max-duration",
-            default=28800.0,
-            show_default="8h",
+            default=0.0,
+            show_default="no limit",
             type=click.FloatRange(min=0.0),
-            help="Safety cap in seconds; 0 disables it.",
+            help=(
+                "Optional safety cap in seconds; 0 (the default) means the recording ends only when the "
+                "meeting does."
+            ),
         ),
         click.option(
             "--close-grace",
@@ -589,6 +708,16 @@ def _session_options(func):
             show_default="5s",
             type=click.FloatRange(min=0.0),
             help="Seconds without a Zoom meeting window before OBS is stopped.",
+        ),
+        click.option(
+            "--waiting-room-timeout",
+            default=1800.0,
+            show_default="30min",
+            type=click.FloatRange(min=0.0),
+            help=(
+                "Stop the recording if still in Zoom's waiting room after this many seconds; 0 waits forever. "
+                "In-meeting recordings are unaffected."
+            ),
         ),
         click.option(
             "--min-free-gb",
@@ -604,16 +733,19 @@ def _session_options(func):
         ),
         click.option("--passcode", default=None, help="Meeting passcode if the link lacks ?pwd=."),
         click.option(
-            "--auto-accept",
-            is_flag=True,
-            help="Press Enter on blocking Zoom prompts (disclosure/confirmation).",
+            "--auto-accept/--no-auto-accept",
+            "auto_accept",
+            default=True,
+            show_default="on",
+            help="Read blocking Zoom dialogs (consent/acknowledge/join audio) and click the matching label.",
         ),
         click.option(
             "--auto-accept-seconds",
             default=20.0,
             show_default="20s",
             type=click.FloatRange(min=0.0),
-            help="How long to keep watching for blocking Zoom prompts.",
+            help="Deprecated: the dialog watcher now runs for the whole session.",
+            hidden=True,
         ),
         click.option(
             "--window-class",
@@ -650,6 +782,13 @@ def _session_options(func):
     help="Exit instead of starting immediately when --start is in the past.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
+@click.option(
+    "--email",
+    "email",
+    default=None,
+    metavar="you@example.com",
+    help="Zoom prejoin email; defaults to the schedule setting, then the built-in one.",
+)
 def record(
     url: str,
     start_at: str,
@@ -662,11 +801,13 @@ def record(
     join_delay: float,
     max_duration: float,
     close_grace: float,
+    waiting_room_timeout: float,
     keep_recording_on_interrupt: bool,
     min_free_gb: float,
     window_classes: tuple[str, ...],
     window_title: str | None,
     passcode: str | None,
+    email: str | None,
     auto_accept: bool,
     auto_accept_seconds: float,
     log_file: str | None,
@@ -720,11 +861,13 @@ def record(
         join_delay=join_delay,
         max_duration=max_duration,
         close_grace=close_grace,
+        waiting_room_timeout=waiting_room_timeout,
         keep_recording_on_interrupt=keep_recording_on_interrupt,
         min_free_gb=min_free_gb,
         window_classes=window_classes,
         window_title=window_title,
         passcode=passcode,
+        email=email,
         auto_accept=auto_accept,
         auto_accept_seconds=auto_accept_seconds,
     )
@@ -749,11 +892,30 @@ def record(
 )
 @click.option("--note", default="", help="Free-text label shown by `list`.")
 @click.option(
+    "--email",
+    default=None,
+    metavar="you@example.com",
+    help="Zoom prejoin email for this meeting (defaults to the schedule setting).",
+)
+@click.option(
     "--repeat",
     type=click.Choice(["none", "weekly", "weekdays"]),
     default="none",
     show_default=True,
     help="Re-arm the event after each recording.",
+)
+@click.option(
+    "--rrule",
+    default=None,
+    metavar="'FREQ=WEEKLY;INTERVAL=2;BYDAY=WE'",
+    help="Full RFC 5545 recurrence; overrides --repeat.",
+)
+@click.option(
+    "--tz",
+    "tz_name",
+    default=None,
+    metavar="'Europe/London'",
+    help="Meeting timezone; keeps 10:00 at 10:00 across DST. Defaults to this machine's zone.",
 )
 @click.option(
     "--schedule",
@@ -768,7 +930,10 @@ def add_meeting(
     start_at: str | None,
     output_dir: str | None,
     note: str,
+    email: str | None,
     repeat: str,
+    tz_name: str | None,
+    rrule: str | None,
     schedule_path: str,
 ) -> None:
     """Add a meeting: `add "11/9/26 10am https://zoom.us/j/123"`.
@@ -818,7 +983,10 @@ def add_meeting(
             start_at=canonical,
             output_dir=output_dir,
             note=note,
+            email=email,
             repeat=None if repeat == "none" else repeat,
+            rrule=rrule,
+            tz=tz_name,
         )
     except (ScheduleError, StoreError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -954,6 +1122,7 @@ def run(
     join_delay: float,
     max_duration: float,
     close_grace: float,
+    waiting_room_timeout: float,
     keep_recording_on_interrupt: bool,
     min_free_gb: float,
     window_classes: tuple[str, ...],
@@ -1047,10 +1216,16 @@ def run(
                 continue
 
             assert entry is not None
+            # Re-read the saved folder per entry so changing it in the UI takes effect without restarting the
+            # runner; an entry's own folder still wins.
+            configured = schedule.setting("output_dir")
+            base_output = (
+                Path(configured).expanduser().resolve() if configured else default_output
+            )
             output = (
                 Path(entry.output_dir).expanduser().resolve()
                 if entry.output_dir
-                else default_output
+                else base_output
             )
             try:
                 output.mkdir(parents=True, exist_ok=True)
@@ -1076,11 +1251,15 @@ def run(
                 join_delay=join_delay,
                 max_duration=max_duration,
                 close_grace=close_grace,
+                waiting_room_timeout=waiting_room_timeout,
                 keep_recording_on_interrupt=keep_recording_on_interrupt,
                 min_free_gb=min_free_gb,
                 window_classes=window_classes,
                 window_title=window_title,
                 passcode=passcode,
+                email=entry.email
+                or schedule.setting("email")
+                or zoom_account.discover(),
                 auto_accept=auto_accept,
                 auto_accept_seconds=auto_accept_seconds,
                 should_stop=lambda: stop_requested(schedule.path),
@@ -1357,6 +1536,136 @@ def import_ics(
     console.print(f"{verb} {added} event(s), skipped {skipped} duplicate(s)")
 
 
+def _slug(text: str) -> str:
+    """Filesystem-safe fragment of a window class."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")[:40] or "window"
+
+
+@cli.command("inspect")
+@click.option("--url", default=None, help="Join link; launches the Zoom client when given.")
+@click.option("--passcode", default=None, help="Meeting passcode if the link lacks ?pwd=.")
+@click.option(
+    "--process",
+    "process_name",
+    default="zoom.exe",
+    show_default=True,
+    help="Executable whose windows are inspected.",
+)
+@click.option(
+    "--seconds",
+    default=20.0,
+    show_default=True,
+    type=click.FloatRange(min=0.0),
+    help="How long to keep watching for new or changing windows.",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    default="./shots",
+    show_default=True,
+    type=click.Path(file_okay=False),
+    help="Directory for frames and word dumps.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
+@click.option("--log-file", default=None, type=click.Path(dir_okay=False), help="Also write logs to a file.")
+def inspect(
+    url: str | None,
+    passcode: str | None,
+    process_name: str,
+    seconds: float,
+    out_dir: str,
+    verbose: bool,
+    log_file: str | None,
+) -> None:
+    """Dump each Zoom window's frame, OCR words and click decision; no OBS needed."""
+    _setup_logging(verbose, log_file)
+    if not is_windows():
+        _fail(1, "window inspection requires Windows")
+    if not ocr.available():
+        log.warning("OCR unavailable: %s", ocr.unavailable_reason())
+
+    if url:
+        log.info("launching %s", url)
+        try:
+            launch_meeting(url, mode="zoommtg", passcode=passcode)
+        except (OSError, RuntimeError) as exc:
+            _fail(1, f"could not launch Zoom: {exc}")
+
+    rules = dialogs.load_rules()
+    target = Path(out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+    target.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(seconds, 0.1)
+    seen: dict[int, str] = {}
+    dumps = 0
+
+    while time.monotonic() < deadline:
+        for window in iter_windows(process_name):
+            if not window.visible or not window.title.strip():
+                continue
+            if window.width < 40 or window.height < 40:
+                # The floating meeting toolbar reports 0x0; PrintWindow returns nothing for it.
+                continue
+            capture = win_capture.grab(window.hwnd)
+            if capture is None:
+                log.warning("hwnd=%#x %r could not be captured", window.hwnd, window.title)
+                continue
+            words = ocr.words(capture.image)
+            digest = dialogs.signature(words) or f"blank {capture.image.size}"
+            if seen.get(window.hwnd) == digest:
+                continue
+            seen[window.hwnd] = digest
+
+            scope = dialogs.scope_for_class(window.cls)
+            click = dialogs.pick(words, rules, scope=scope)
+            stem = f"{window.hwnd:08x}_{_slug(window.cls)}"
+            capture.image.save(target / f"{stem}.png")
+            record = {
+                "hwnd": window.hwnd,
+                "class": window.cls,
+                "title": window.title,
+                "scope": scope,
+                "capture_method": capture.method,
+                "origin": list(capture.origin),
+                "size": list(capture.image.size),
+                "signature": digest,
+                "text": ocr.text(capture.image),
+                "words": [
+                    {
+                        "text": word.text,
+                        "x": word.x,
+                        "y": word.y,
+                        "width": word.width,
+                        "height": word.height,
+                        "line": word.line,
+                    }
+                    for word in words
+                ],
+                "would_click": None
+                if click is None
+                else {
+                    "rule": click.rule,
+                    "label": click.label,
+                    "score": round(click.score, 3),
+                    "frame_xy": [click.x, click.y],
+                    "screen_xy": list(capture.to_screen(click.x, click.y)),
+                },
+            }
+            (target / f"{stem}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+            dumps += 1
+
+            if click is None:
+                console.print(f"[yellow]{window.cls}[/] {window.title!r}: no matching rule")
+            else:
+                screen_xy = capture.to_screen(click.x, click.y)
+                console.print(
+                    f"[green]{window.cls}[/] {window.title!r}: would click {click.label!r} "
+                    f"at {screen_xy} (rule {click.rule}, score {click.score:.2f})"
+                )
+        time.sleep(0.7)
+
+    console.print(f"[green]{dumps} window dump(s) -> {target}[/]")
+
+
 @cli.command("probe")
 @click.option("--url", required=True, help="Zoom join link to test.")
 @click.option("--passcode", default=None, help="Meeting passcode if the link lacks ?pwd=.")
@@ -1400,6 +1709,12 @@ def probe(
         window.cls,
         window.title,
     )
+    watcher = DialogWatcher(
+        dry_run=not auto_accept,
+        shots_dir=Path("./shots") / datetime.now().strftime("%Y%m%d-%H%M%S"),
+        email=zoom_account.discover(),
+    )
+    watcher.start()
     deadline = time.monotonic() + observe
     while time.monotonic() < deadline:
         for candidate in iter_windows():
@@ -1411,11 +1726,10 @@ def probe(
                     candidate.title,
                     candidate.area,
                 )
-        if auto_accept:
-            prompt = accept_prompt(window.hwnd)
-            if prompt is not None:
-                log.info("dismissed prompt %r (%s)", prompt.title, prompt.cls)
         time.sleep(1.0)
+
+    watcher.stop()
+    log.info("dialog watcher: %s", watcher.summary())
 
     if leave:
         close_window(window.hwnd)

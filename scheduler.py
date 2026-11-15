@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable
 
 START_FORMAT = "%Y-%m-%d %H:%M"
@@ -98,23 +98,6 @@ def format_delta(seconds: float) -> str:
     clock = f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{days}d {clock}" if days else clock
 
-
-def next_occurrence(start: datetime, repeat: str, after: datetime) -> datetime:
-    """Next weekly/weekday occurrence strictly after *after*."""
-    if repeat == "weekly":
-        step = timedelta(days=7)
-    elif repeat == "weekdays":
-        step = timedelta(days=1)
-    else:
-        raise ScheduleError(f"unknown repeat {repeat!r}; use weekly or weekdays")
-
-    candidate = start
-    while candidate <= after:
-        candidate += step
-        if repeat == "weekdays":
-            while candidate.weekday() >= 5:
-                candidate += timedelta(days=1)
-    return candidate
 
 
 def render_countdown(remaining: float, target: datetime):

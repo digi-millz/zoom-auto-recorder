@@ -68,8 +68,9 @@ python main.py record --url "https://zoom.us/j/81234567890" --start "2026-11-09 
 | `--launch-mode` | `zoommtg` | `zoommtg` = desktop client via protocol handler, `https` = browser |
 | `--join-timeout` | `300` | Seconds to wait for the meeting window |
 | `--join-delay` | `0` | Extra seconds between maximising Zoom and recording |
-| `--max-duration` | `28800` (8h) | Safety cap; `0` disables it |
+| `--max-duration` | `0` (no limit) | Optional safety cap in seconds. By default a recording ends **only when the meeting does**. |
 | `--close-grace` | `5` | Seconds without a Zoom meeting window before OBS is stopped |
+| `--waiting-room-timeout` | `1800` (30 min) | Stop if still in the waiting room after this long; `0` waits forever. In-meeting recordings are unaffected |
 | `--min-free-gb` | `2` | Refuse to start below this free space; `0` disables |
 | `--window-class` | none | Extra Zoom window class treated as the meeting window (repeatable) |
 | `--window-title` | none | Regex on the meeting window title (case-insensitive) |
@@ -146,12 +147,27 @@ python main.py gui                 # http://127.0.0.1:8765, opens the browser
 python main.py gui --port 8800 --no-open
 ```
 
-The page has a month calendar (days with events are badged), an add form
-(date, time, link, note, repeat), the entry table with status and recorded file,
-and Start/Stop runner controls. It binds to `127.0.0.1` only, embeds a random
-per-launch token and rejects requests without that token, a non-local
-`Origin`/`Host`, or a non-JSON POST — it is a desktop control panel, not a
-network service.
+The page has a month calendar (days with events are badged), an add form, the entry table with status and
+recorded file, Start/Stop runner controls, and a live runner-log pane.
+
+Add form:
+
+- **Date / Time** — clicking a calendar day fills the date.
+- **Zoom link** — the whole invite can be pasted; the meeting ID and passcode are extracted.
+- **Repeats** — once / daily / weekly / every 2 weeks / monthly, with weekday checkboxes and an end
+  (never / on a date / after N times). This builds a real RRULE, and the line under the form previews the
+  next five occurrences, computed by the same code the runner uses.
+- **Timezone** — a dropdown, **defaulting to Eastern (America/New_York)**. The zone is stored on the event, so
+  a 10:00 Eastern meeting stays 10:00 Eastern no matter what zone this machine reports. Preview times are shown
+  in the machine's zone, which is when the recording will actually start.
+- **Save this one to** — per-event recordings folder, overriding the global one.
+- **Recordings** card — the global folder (`settings.output_dir` in `schedule.json`), created on save; the
+  runner re-reads it per event, so changing it takes effect without a restart.
+
+Security and tokens: it binds to `127.0.0.1` only, embeds a per-launch token and rejects requests without it, a
+non-local `Origin`/`Host`, or a non-JSON POST — a desktop control panel, not a network service. Only one instance
+can own the port; a second launch exits with a message telling you to reuse the running one. An open tab from a
+previous launch reloads itself once when it sees a 401, because its baked-in token no longer matches.
 
 ## Start at logon
 
@@ -199,8 +215,9 @@ are skipped, and `FREQ=WEEKLY` becomes `repeat: weekly`.
 `Zoom.exe` keeps running after a meeting ends (tray icon, home window), so
 "process exited" would never fire and "process alive" is always true. The stop
 condition is therefore the disappearance of the meeting window that was
-maximised, with process exit as a secondary trigger and `--max-duration` as a
-last-resort cap.
+maximised, with process exit as a secondary trigger. There is **no time limit by
+default**: a meeting that runs over keeps recording until the host closes it (or you are removed from it).
+`--max-duration` is available as an opt-in cap.
 
 ## OBS fallback when OBS is not running
 
@@ -290,16 +307,29 @@ Run these once on the target machine; they cannot be automated here.
 ## Limitations
 
 - Windows only; no macOS/Linux support.
-- The tool does not configure OBS sources, encoders or audio. The scene must
-  already capture the monitor the Zoom window is on.
-- Waiting rooms are not admitted automatically; the recording starts on the
-  meeting window, which may show the waiting room first.
-- `--start` is naive local time; there is no DST or timezone conversion.
-- Window class names are version-dependent. Selection logs candidates at
-  `-v`; pass `--window-class`/`--window-title` if a future Zoom build renames
-  them.
-- If the WebSocket connection drops mid-recording, the tool cannot stop OBS.
-- Complex RRULEs (`BYDAY=MO,WE`, `COUNT`, `UNTIL`) are reduced to `weekly` on
-  import; edit the entry afterwards if that is wrong.
-- The GUI is a localhost control panel with a per-launch token, not a
-  multi-user service; do not bind it to a public interface.
+- **OBS is configured for you**: the scene, the Zoom-window capture (DXGI — Windows Graphics Capture renders
+  Zoom's CEF windows black) and per-process audio. OBS's global `Desktop Audio`/`Mic/Aux` devices are muted on
+  every run, because the desktop device already contains Zoom and would record every voice twice (echo).
+- Your microphone is **not** recorded. There is no per-event mic setting yet.
+- Waiting rooms are not admitted automatically — nothing on the client side can. Recording starts on the waiting
+  room window and keeps going; if you are admitted, the capture re-points to the meeting window automatically. If
+  the host never admits you, the recording stops once `--waiting-room-timeout` (30 min by default) is exceeded, and
+  the waiting-room window is left open — closing it raises Zoom's "End meeting or leave meeting?" dialog, and a
+  blind click there can end the host's meeting. The next scheduled run dismisses it with the *Leave & join* rule.
+- Zoom's "Enter your email and name" prompt is answered from: the event's own **Zoom email** → the **Zoom email**
+  in the Settings card (stored as `settings.email` in `schedule.json`) → an address Zoom spells out in its own
+  config (`zoom_account.discover()`) → nothing. There is **no address in the source**; with nothing configured the
+  prompt is left alone and the run reports `needs_attention`. Zoom keeps the signed-in address in encrypted
+  config, so it cannot be read reliably — set it once in the UI.
+- A meeting passcode must be in the link (`?pwd=…`) or passed with `--passcode`, since the client is never asked to
+  type it.
+- The "Join new meeting? … Leave & join" dialog is dismissed automatically so a scheduled meeting can start. It
+  leaves whatever meeting that Zoom client is already in — delete that rule from `rules.json` to refuse instead.
+- Window class names are version-dependent. `main.py inspect` dumps every Zoom window, its OCR words and the
+  click it would make; `rules.json` is data, so a relabelled button is a config change, not a code change.
+- If the WebSocket connection drops mid-recording, the tool cannot stop OBS cleanly (the file is still playable —
+  OBS writes Hybrid MP4).
+- `.ics` import still flattens complex RRULEs (`BYDAY=MO,WE`, `COUNT`, `UNTIL`) to `weekly`; edit the entry
+  afterwards, or add it with `--rrule`.
+- The GUI is a localhost control panel with a per-launch token, not a multi-user service; do not bind it to a
+  public interface.

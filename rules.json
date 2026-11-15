@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "deny": [
+    "Cancel",
+    "Decline",
+    "Sign In",
+    "Switch Account",
+    "Leave",
+    "Leave Meeting",
+    "End Meeting",
+    "Remove",
+    "Exit"
+  ],
+  "rules": [
+    {
+      "name": "leave-and-join",
+      "scope": "prejoin",
+      "match": { "text": ["Leave & join", "Leave and join"] },
+      "action": { "kind": "clickText" },
+      "max_fires": 1
+    },
+    {
+      "name": "consent",
+      "scope": "dialog",
+      "match": { "text": ["Acknowledge", "Continue", "Got it", "I Agree", "Agree", "OK"] },
+      "action": { "kind": "clickText" },
+      "max_fires": 3,
+      "threshold": 0.85
+    },
+    {
+      "name": "join-audio",
+      "scope": "any",
+      "match": { "text": ["Join with Computer Audio", "Join Audio by Computer", "Use Computer Audio"] },
+      "action": { "kind": "clickText" },
+      "max_fires": 2
+    },
+    {
+      "name": "prejoin",
+      "scope": "prejoin",
+      "match": { "text": ["Join meeting", "Join"], "exclude": ["Join with Computer Audio", "Join from browser"] },
+      "action": { "kind": "clickText" },
+      "max_fires": 2
+    },
+    {
+      "name": "leave-confirm",
+      "scope": "meeting",
+      "match": { "text": ["Leave Meeting"] },
+      "action": { "kind": "clickText" },
+      "max_fires": 1
+    }
+  ]
+}

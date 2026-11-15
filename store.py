@@ -11,17 +11,23 @@ import json
 import logging
 import os
 import uuid
+import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from scheduler import START_FORMAT, ScheduleError, next_occurrence, parse_when
+import recurrence
+
+from scheduler import START_FORMAT, ScheduleError, parse_when
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+# How long an empty lock file is trusted to be "being written right now" rather than abandoned.
+LOCK_SETTLE = 2.0
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -57,7 +63,11 @@ class Entry:
     start: str  # "YYYY-MM-DD HH:MM", local wall clock
     output_dir: str | None = None
     note: str = ""
-    repeat: str | None = None
+    email: str | None = None  # Zoom prejoin email for this meeting; empty uses the global default
+    repeat: str | None = None  # legacy: "weekly" / "weekdays"; kept for old schedule files
+    rrule: str | None = None  # RFC 5545 recurrence, e.g. "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE"
+    tz: str | None = None  # IANA zone name; empty means this machine's zone
+    anchor: str | None = None  # first start, so COUNT/UNTIL keep counting from the beginning
     status: str = STATUS_PENDING
     created: str = ""
     last_exit_code: int | None = None
@@ -82,11 +92,13 @@ class ScheduleStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
         self.entries: list[Entry] = []
+        self.settings: dict[str, str] = {}
         self.reload()
 
     # -- io ---------------------------------------------------------------- #
 
     def reload(self) -> None:
+        self.settings = {}
         if not self.path.exists():
             self.entries = []
             return
@@ -107,11 +119,20 @@ class ScheduleStore:
             except ScheduleError as exc:
                 raise StoreError(f"{self.path}: entry {entry.id} has an invalid start: {exc}") from exc
             entries.append(entry)
+
+        raw_settings = payload.get("settings")
+        if isinstance(raw_settings, dict):
+            self.settings = {
+                str(key): str(value)
+                for key, value in raw_settings.items()
+                if isinstance(value, (str, int, float)) and str(value).strip()
+            }
         self.entries = entries
 
     def save(self) -> None:
         payload = {
             "version": SCHEMA_VERSION,
+            "settings": dict(self.settings),
             "entries": [entry.to_dict() for entry in self.entries],
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +142,18 @@ class ScheduleStore:
             os.replace(temporary, self.path)
         except OSError as exc:
             raise StoreError(f"cannot write {self.path}: {exc}") from exc
+
+    # -- settings ----------------------------------------------------------- #
+
+    def setting(self, key: str, default: str | None = None) -> str | None:
+        value = self.settings.get(str(key))
+        return value if value else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Persist one setting next to the entries (re-read first, like every mutation)."""
+        self.reload()
+        self.settings[str(key)] = str(value)
+        self.save()
 
     # -- queries ------------------------------------------------------------ #
 
@@ -142,7 +175,10 @@ class ScheduleStore:
         start_at: str,
         output_dir: str | None = None,
         note: str = "",
+        email: str | None = None,
         repeat: str | None = None,
+        rrule: str | None = None,
+        tz: str | None = None,
     ) -> Entry:
         repeat = (repeat or "").strip().lower() or None
         if repeat in ("none", "once"):
@@ -150,6 +186,15 @@ class ScheduleStore:
         if repeat not in (None, "weekly", "weekdays"):
             raise ScheduleError(f"unknown repeat {repeat!r}; use weekly or weekdays")
         start = parse_when(start_at)
+        spec = (rrule or "").strip() or recurrence.legacy_repeat_to_rrule(repeat)
+        if spec:
+            # Validate now, against a real zone, so a bad rule cannot poison the schedule file.
+            recurrence.build(spec, start.strftime(START_FORMAT), tz)
+        if tz:
+            recurrence.zone(tz)
+        clean_email = (email or "").strip() or None
+        if clean_email and ("@" not in clean_email or clean_email.endswith("@")):
+            raise ScheduleError(f"{clean_email!r} is not an email address")
         self.reload()
         entry = Entry(
             id=uuid.uuid4().hex[:8],
@@ -157,10 +202,76 @@ class ScheduleStore:
             start=start.strftime(START_FORMAT),
             output_dir=output_dir,
             note=note.strip(),
+            email=clean_email,
             repeat=repeat or None,
+            rrule=spec or None,
+            tz=(tz or "").strip() or None,
+            anchor=start.strftime(START_FORMAT) if spec else None,
             created=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self.entries.append(entry)
+        self.save()
+        return entry
+
+    def update(self, entry_id: str, **changes: object) -> Entry | None:
+        """Change fields of an existing entry and re-arm it.
+
+        Only the keys passed are touched; ``None`` means "leave alone" (so a CLI flag that was not given cannot
+        blank a value). Validation runs before anything is written, so a bad edit leaves the file untouched.
+        """
+        allowed = {"url", "start_at", "output_dir", "note", "email", "repeat", "rrule", "tz"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ScheduleError(f"cannot edit {sorted(unknown)}")
+        self.reload()
+        entry = self.get(entry_id)
+        if entry is None:
+            return None
+
+        start = parse_when(str(changes["start_at"])) if changes.get("start_at") else entry.start_at
+        repeat = changes.get("repeat")
+        if repeat is not None:
+            repeat = (str(repeat) or "").strip().lower() or None
+            if repeat in ("none", "once"):
+                repeat = None
+            if repeat not in (None, "weekly", "weekdays"):
+                raise ScheduleError(f"unknown repeat {repeat!r}; use weekly or weekdays")
+        else:
+            repeat = entry.repeat
+
+        rrule = changes.get("rrule")
+        spec = (str(rrule) or "").strip() if rrule is not None else (entry.rrule or "")
+        if not spec:
+            spec = recurrence.legacy_repeat_to_rrule(repeat) or ""
+        tz = changes.get("tz") if changes.get("tz") is not None else entry.tz
+        tz = str(tz or "").strip() or None
+        if spec:
+            recurrence.build(spec, start.strftime(START_FORMAT), tz)
+        if tz:
+            recurrence.zone(tz)
+
+        email = changes.get("email")
+        if email is not None:
+            email = str(email).strip() or None
+            if email and ("@" not in email or email.endswith("@")):
+                raise ScheduleError(f"{email!r} is not an email address")
+        else:
+            email = entry.email
+
+        entry.start = start.strftime(START_FORMAT)
+        entry.repeat = repeat
+        entry.rrule = spec or None
+        entry.tz = tz
+        entry.anchor = start.strftime(START_FORMAT) if spec else None
+        entry.email = email
+        if changes.get("url") is not None:
+            entry.url = str(changes["url"]).strip()
+        if changes.get("note") is not None:
+            entry.note = str(changes["note"]).strip()
+        if changes.get("output_dir") is not None:
+            entry.output_dir = str(changes["output_dir"]).strip() or None
+        # An edit is a re-arm: a finished or missed entry becomes schedulable again.
+        entry.status = STATUS_PENDING
         self.save()
         return entry
 
@@ -194,15 +305,28 @@ class ScheduleStore:
         return entry
 
     def roll_repeat(self, entry_id: str, now: datetime | None = None) -> Entry | None:
-        """Advance a repeating entry to its next occurrence and re-arm it."""
+        """Advance a repeating entry to its next occurrence and re-arm it.
+
+        Uses the entry's RRULE (legacy ``repeat`` values map onto one). When the rule is exhausted — ``UNTIL`` or
+        ``COUNT`` reached — the entry is marked done instead of being re-armed forever.
+        """
         self.reload()
         entry = self.get(entry_id)
-        if entry is None or not entry.repeat:
+        if entry is None:
+            return None
+        spec = entry.rrule or recurrence.legacy_repeat_to_rrule(entry.repeat)
+        if not spec:
             return None
         current = now or datetime.now()
-        entry.start = next_occurrence(
-            entry.start_at, entry.repeat, current
-        ).strftime(START_FORMAT)
+        following = recurrence.next_start_local(
+            spec, entry.anchor or entry.start, entry.tz, after=current
+        )
+        if following is None:
+            log.info("recurrence for %s is finished (%s); marking done", entry.id, spec)
+            entry.status = STATUS_DONE
+            self.save()
+            return entry
+        entry.start = following.strftime(START_FORMAT)
         entry.status = STATUS_PENDING
         self.save()
         return entry
@@ -310,7 +434,35 @@ class RunnerLock:
             return None
 
     def _owner_alive(self) -> bool:
-        return self.owner_pid() is not None
+        """True when the lock is genuinely held.
+
+        A parseable pid decides on its own: alive → held, dead → stale (that is how a crashed runner is recovered).
+        An **empty** file is the one ambiguity — ``acquire`` creates it with O_EXCL and writes the pid a moment
+        later, and treating that instant as stale let two runners own the lock (seen live). So an empty lock is
+        only reclaimed once it is older than :data:`LOCK_SETTLE`.
+        """
+        try:
+            raw = self.path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        if raw:
+            try:
+                pid = int(raw)
+            except ValueError:
+                return False
+            if pid <= 0:
+                return False
+            import psutil
+
+            try:
+                return psutil.pid_exists(pid)
+            except Exception:  # pragma: no cover - defensive
+                return True
+        try:
+            age = time.time() - self.path.stat().st_mtime
+        except OSError:
+            return False
+        return age < LOCK_SETTLE
 
     def release(self) -> None:
         if not self._held:

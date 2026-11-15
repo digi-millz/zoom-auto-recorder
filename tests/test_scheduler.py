@@ -94,27 +94,6 @@ class WaitWithCountdownTests(unittest.TestCase):
         self.assertTrue(all(0 < seconds <= 0.5 for seconds in slept))
 
 
-class NextOccurrenceTests(unittest.TestCase):
-    def test_weekly_advances_seven_days(self):
-        start = datetime(2026, 11, 9, 10, 0)
-        self.assertEqual(
-            scheduler.next_occurrence(start, "weekly", datetime(2026, 11, 9, 11, 0)),
-            datetime(2026, 11, 16, 10, 0),
-        )
-
-    def test_weekdays_friday_rolls_to_monday(self):
-        friday = datetime(2026, 11, 13, 10, 0)
-        self.assertEqual(
-            scheduler.next_occurrence(friday, "weekdays", datetime(2026, 11, 13, 11, 0)),
-            datetime(2026, 11, 16, 10, 0),
-        )
-
-    def test_unknown_repeat_rejected(self):
-        with self.assertRaises(scheduler.ScheduleError):
-            scheduler.next_occurrence(
-                datetime(2026, 11, 9), "monthly", datetime(2026, 11, 9)
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

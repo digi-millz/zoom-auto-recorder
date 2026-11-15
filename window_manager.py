@@ -35,13 +35,7 @@ PRIMARY_MEETING_CLASSES = frozenset(
         "zChangeNameWndClass",          # pre-join name prompt
     }
 )
-PROMPT_CLASSES = frozenset(
-    {
-        "zRichMsgBoxClass",   # "Disclosure" / recording notice, join confirmations
-        "ConfPopupTopClass",  # misc meeting popups
-    }
-)
-PREJOIN_CLASSES = frozenset({"VideoPreviewWndClass"})  # camera/mic preview with Join
+
 SECONDARY_CLASSES = frozenset({"zVideoShowWndClass"})  # fullscreen/pop-out video
 EXCLUDED_CLASSES = frozenset({"ZPPTMainFrmWndClass"})  # Zoom home/Workplace window
 HOME_TITLES = frozenset({"zoom", "zoom workplace", "zoom cloud meetings", "zoom meetings"})
@@ -347,10 +341,10 @@ def maximize(hwnd: int) -> None:
     _user32.ShowWindow(hwnd, SW_RESTORE)
     if not _user32.ShowWindow(hwnd, SW_MAXIMIZE):
         raise OSError(ctypes.get_last_error(), "ShowWindow(SW_MAXIMIZE) failed")
-    _force_foreground(hwnd)
+    force_foreground(hwnd)
 
 
-def _force_foreground(hwnd: int) -> None:
+def force_foreground(hwnd: int) -> None:
     """Windows may refuse SetForegroundWindow; attach to the FG thread and retry."""
     if _user32.SetForegroundWindow(hwnd):
         return
@@ -368,54 +362,41 @@ def _force_foreground(hwnd: int) -> None:
         _user32.BringWindowToTop(hwnd)
 
 
-def select_prompt_window(
-    windows: Iterable[WindowInfo], meeting_hwnd: int | None = None
-) -> WindowInfo | None:
-    """Pick a Zoom dialog that is blocking the join (disclosure/confirmation)."""
-    for window in windows:
-        if not window.visible or not window.title.strip():
-            continue
-        if meeting_hwnd is not None and window.hwnd == meeting_hwnd:
-            continue
-        if window.cls in PROMPT_CLASSES:
-            return window
-    for window in windows:
-        if (
-            window.visible
-            and window.cls in PREJOIN_CLASSES
-            and (meeting_hwnd is None or window.hwnd != meeting_hwnd)
-        ):
-            return window
-    return None
 
 
-def _click_relative(hwnd: int, fx: float, fy: float) -> None:
-    rect = wintypes.RECT()
-    _user32.GetWindowRect(hwnd, ctypes.byref(rect))
-    x = rect.left + int((rect.right - rect.left) * fx)
-    y = rect.top + int((rect.bottom - rect.top) * fy)
-    _user32.SetCursorPos(x, y)
-    time.sleep(0.15)
-    _user32.mouse_event(0x0002, 0, 0, 0, 0)
-    time.sleep(0.08)
-    _user32.mouse_event(0x0004, 0, 0, 0, 0)
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
 
 
-def accept_prompt(meeting_hwnd: int | None = None) -> WindowInfo | None:
-    """Dismiss the first blocking Zoom prompt or press Join on the preview."""
+def click_at(x: int, y: int, settle: float = 0.06) -> None:
+    """Left-click at absolute screen pixels.
+
+    The caller is responsible for the target: this never decides *where* to click, only that a click happens
+    (see ``dialogs.pick`` / ``watcher.DialogWatcher``).
+    """
     _require_windows()
-    prompt = select_prompt_window(iter_windows(), meeting_hwnd)
-    if prompt is None:
-        return None
-    _user32.SetForegroundWindow(prompt.hwnd)
-    time.sleep(0.2)
-    if prompt.cls in PREJOIN_CLASSES:
-        _click_relative(prompt.hwnd, 0.88, 0.92)
-    else:
-        _user32.keybd_event(0x0D, 0, 0, 0)
-        time.sleep(0.05)
-        _user32.keybd_event(0x0D, 0, 2, 0)
-    return prompt
+    _user32.SetCursorPos(int(x), int(y))
+    time.sleep(settle)
+    _user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.04)
+    _user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+
+
+def type_text(text: str, per_char: float = 0.012) -> None:
+    """Type *text* into whatever has keyboard focus (Unicode keystrokes, so ``@`` and ``.`` work).
+
+    Used for Zoom's "Enter your email and name" prejoin prompt, which CEF renders as one surface — there is no
+    control to set a value on, only the focused field.
+    """
+    _require_windows()
+    for char in text:
+        code = ord(char)
+        _user32.keybd_event(0, code, KEYEVENTF_UNICODE, 0)
+        _user32.keybd_event(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0)
+        if per_char:
+            time.sleep(per_char)
 
 
 def close_window(hwnd: int) -> None:

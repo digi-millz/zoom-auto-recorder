@@ -1,14 +1,16 @@
 import json
+import os
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 
+import store as store_module
 from scheduler import ScheduleError
 from store import (
     STATUS_DONE,
     STATUS_FAILED,
-    STATUS_MISSED,
     STATUS_PENDING,
     STATUS_RUNNING,
     Entry,
@@ -21,6 +23,7 @@ from store import (
     split_entry_spec,
     stop_requested,
 )
+
 
 NOW = datetime(2026, 11, 9, 18, 0, 0)
 
@@ -172,6 +175,19 @@ class RunnerLockTests(unittest.TestCase):
         self.assertTrue(self.lock().acquire())
         self.assertNotEqual(lock_path.read_text(encoding="utf-8"), "999999")
 
+    def test_empty_lock_being_written_is_not_stolen(self):
+        # acquire() creates the file with O_EXCL, then writes its pid; a second runner must not read that as stale.
+        lock_path = self.schedule.with_name(self.schedule.name + ".lock")
+        lock_path.write_text("", encoding="utf-8")
+        self.assertFalse(self.lock().acquire())
+
+    def test_abandoned_empty_lock_is_reclaimed(self):
+        lock_path = self.schedule.with_name(self.schedule.name + ".lock")
+        lock_path.write_text("", encoding="utf-8")
+        old = time.time() - (store_module.LOCK_SETTLE + 5)
+        os.utime(lock_path, (old, old))
+        self.assertTrue(self.lock().acquire())
+
 
 class SplitEntrySpecTests(unittest.TestCase):
     def test_when_then_url(self):
@@ -226,6 +242,57 @@ class RepeatTests(unittest.TestCase):
             store = ScheduleStore(Path(temp) / "schedule.json")
             added = store.add(url="https://zoom.us/j/1", start_at="2026-11-09 10:00")
             self.assertIsNone(store.roll_repeat(added.id))
+
+
+class UpdateTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.path = Path(temp.name) / "schedule.json"
+        self.store = ScheduleStore(self.path)
+        self.entry = self.store.add(
+            url="https://zoom.us/j/1",
+            start_at="2026-11-09 10:00",
+            note="typo",
+            email="a@b.com",
+            repeat="weekly",
+        )
+
+    def test_edit_changes_only_the_given_fields(self):
+        updated = self.store.update(self.entry.id, start_at="2026-11-10 11:30", note="fixed")
+        assert updated is not None
+        self.assertEqual(updated.start, "2026-11-10 11:30")
+        self.assertEqual(updated.note, "fixed")
+        self.assertEqual(updated.email, "a@b.com", "an omitted field must survive")
+        self.assertEqual(updated.repeat, "weekly")
+
+    def test_edit_rearms_a_finished_entry(self):
+        self.store.mark(self.entry.id, STATUS_DONE, exit_code=0, path="C:/rec/a.mp4")
+        updated = self.store.update(self.entry.id, start_at="2026-11-12 10:00")
+        assert updated is not None
+        self.assertEqual(updated.status, STATUS_PENDING)
+
+    def test_editing_a_rule_moves_the_anchor(self):
+        updated = self.store.update(
+            self.entry.id, start_at="2026-11-16 10:00", rrule="FREQ=WEEKLY;INTERVAL=2;BYDAY=WE"
+        )
+        assert updated is not None
+        self.assertEqual(updated.anchor, "2026-11-16 10:00")
+        self.assertEqual(updated.rrule, "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE")
+
+    def test_a_bad_edit_leaves_the_file_alone(self):
+        with self.assertRaises(ScheduleError):
+            self.store.update(self.entry.id, email="nope")
+        reloaded = ScheduleStore(self.path).entries[0]
+        self.assertEqual(reloaded.email, "a@b.com")
+        self.assertEqual(reloaded.start, "2026-11-09 10:00")
+
+    def test_unknown_field_is_rejected(self):
+        with self.assertRaises(ScheduleError):
+            self.store.update(self.entry.id, nonsense="x")
+
+    def test_unknown_entry_returns_none(self):
+        self.assertIsNone(self.store.update("nosuchid", note="x"))
 
 
 if __name__ == "__main__":
