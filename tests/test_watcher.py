@@ -116,6 +116,28 @@ class ClickTests(unittest.TestCase):
         self.assertEqual(watcher.stats.alerts, 1, "alert once, not on every poll")
         self.assertIn("connection", watcher.alerts[0].text)
 
+    def test_an_unchanged_unknown_dialog_alerts_once_not_every_alert_after(self) -> None:
+        # 346 screenshots / 18 MB in 20 minutes on the 2026-11-15 prejoin window: it re-alerted every ~7 s.
+        desktop = FakeDesktop([[word("Your", 60, 40), word("connection", 150, 40)]] * 6)
+        watcher = make_watcher(desktop, alert_after=0.0)
+        for _ in range(6):
+            watcher.poll_once()
+        self.assertEqual(watcher.stats.alerts, 1)
+
+    def test_a_dialog_whose_text_changes_alerts_again(self) -> None:
+        desktop = FakeDesktop(
+            [
+                [word("Your", 60, 40), word("connection", 150, 40)],
+                [word("Your", 60, 40), word("connection", 150, 40)],
+                [word("Meeting", 60, 40), word("expired", 150, 40)],
+                [word("Meeting", 60, 40), word("expired", 150, 40)],
+            ]
+        )
+        watcher = make_watcher(desktop, alert_after=0.0)
+        for _ in range(4):
+            watcher.poll_once()
+        self.assertEqual(watcher.stats.alerts, 2)
+
     def test_home_window_is_not_a_dialog(self) -> None:
         desktop = FakeDesktop([[word("Home", 60, 40), word("Calendar", 150, 40)]])
         desktop.windows = [window(cls="ZPPTMainFrmWndClassEx", title="Zoom Workplace")]

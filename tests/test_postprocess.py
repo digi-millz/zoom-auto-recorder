@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import postprocess
 
@@ -38,6 +40,49 @@ class ArgumentTests(unittest.TestCase):
         args = postprocess.probe_args(Path("a.mp4"), "ffprobe")
         self.assertIn("-print_format", args)
         self.assertIn("json", args)
+
+    def test_a_multi_gigabyte_recording_gets_patience_and_no_faststart(self) -> None:
+        # 11.6 GB was killed by a fixed 600 s timeout mid-rewrite; `+faststart` doubles the write volume.
+        with tempfile.TemporaryDirectory() as tmp:
+            big = Path(tmp) / "16-00.mkv"
+            with big.open("wb") as handle:
+                handle.truncate(5 * 1024**3)
+            args = postprocess.remux_args(big, Path(tmp) / "out.mp4", "ffmpeg")
+            timeout = postprocess.remux_timeout(big)
+        self.assertNotIn("+faststart", args)
+        self.assertGreater(timeout, postprocess.REMOUNT_MIN_SECONDS)
+
+    def test_a_normal_recording_keeps_faststart_and_the_default_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            small = Path(tmp) / "short.mkv"
+            small.write_bytes(b"x" * 1024)
+            args = postprocess.remux_args(small, Path(tmp) / "out.mp4", "ffmpeg")
+            timeout = postprocess.remux_timeout(small)
+        self.assertIn("+faststart", args)
+        self.assertEqual(timeout, postprocess.REMOUNT_MIN_SECONDS)
+
+    def test_a_failed_remux_leaves_no_partial_mp4(self) -> None:
+        # A killed ffmpeg writes 11 GB of header-less mp4 that looks finished and plays as "invalid data".
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "rec.mkv"
+            source.write_bytes(b"data")
+
+            def fake_run(args, timeout=600):
+                if "-print_format" in args:
+                    return subprocess.CompletedProcess(args, 1, "", "no probe")
+                Path(args[-1]).write_bytes(b"partial")
+                return subprocess.CompletedProcess(args, 1, "", "boom")
+
+            with patch.object(postprocess, "_run", side_effect=fake_run), patch.object(
+                postprocess.shutil, "which", return_value="ffmpeg"
+            ):
+                recording = postprocess.finalize(
+                    source, root / "out", datetime(2026, 11, 15, 16, 0), "STB"
+                )
+            leftovers = list((root / "out").glob("*.mp4"))
+            self.assertEqual(leftovers, [])
+            self.assertEqual(recording.path.suffix, ".mkv")
 
 
 class ProbeParsingTests(unittest.TestCase):

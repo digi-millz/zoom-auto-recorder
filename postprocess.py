@@ -52,22 +52,32 @@ def stem_for(when: datetime, title: str) -> str:
     """``2026-11-09_10-00_weekly-sync``."""
     return f"{when.strftime('%Y-%m-%d_%H-%M')}_{slug(title)}"
 
+# A remux with `+faststart` rewrites the whole file, so a fixed 600 s timeout killed the 11.6 GB 16:00 recording
+# mid-rewrite and left 11 GB of header-less mp4 beside the good mkv. Allow 8 MB/s of source, never under 10 min.
+REMOUNT_MIN_SECONDS = 600
+REMOUNT_BYTES_PER_SECOND = 8 * 1024 * 1024
+# `+faststart` matters for streaming, not local playback, and it doubles the write volume on huge files.
+FASTSTART_LIMIT_BYTES = 4 * 1024**3
+
+
+def remux_timeout(source: Path) -> int:
+    """Seconds to allow ffmpeg for *source*, scaled by its size."""
+    try:
+        size = Path(source).stat().st_size
+    except OSError:
+        return REMOUNT_MIN_SECONDS
+    return max(REMOUNT_MIN_SECONDS, int(size / REMOUNT_BYTES_PER_SECOND) + 60)
 
 def remux_args(source: Path, target: Path, ffmpeg: str = "ffmpeg") -> list[str]:
     """ffmpeg argv that rewraps without re-encoding."""
-    return [
-        ffmpeg,
-        "-y",
-        "-loglevel",
-        "error",
-        "-i",
-        str(source),
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        str(target),
-    ]
+    args = [ffmpeg, "-y", "-loglevel", "error", "-i", str(source), "-c", "copy"]
+    try:
+        big = Path(source).stat().st_size > FASTSTART_LIMIT_BYTES
+    except OSError:
+        big = False
+    if not big:
+        args += ["-movflags", "+faststart"]
+    return args + [str(target)]
 
 
 def probe_args(path: Path, ffprobe: str = "ffprobe") -> list[str]:
@@ -169,8 +179,8 @@ def probe_payload(path: Path) -> str | None:
     return result.stdout
 
 
-def _run(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(args, capture_output=True, text=True, timeout=600, check=False)
+def _run(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
 
 
 def inspect(path: Path) -> tuple[float, bool, bool]:
@@ -217,7 +227,7 @@ def finalize(
         else:
             result = None
             try:
-                result = _run(remux_args(source, final, binary))
+                result = _run(remux_args(source, final, binary), timeout=remux_timeout(source))
             except (OSError, subprocess.SubprocessError) as exc:
                 log.warning("ffmpeg could not run (%s); keeping %s", exc, source.name)
             if result is not None and result.returncode == 0 and final.exists():
@@ -228,12 +238,21 @@ def finalize(
                         source.unlink()
                     except OSError as exc:
                         log.debug("could not delete %s: %s", source, exc)
-            elif result is not None:
-                log.warning(
-                    "remux failed (%s); keeping %s",
-                    (result.stderr or "").strip()[:200] or f"exit {result.returncode}",
-                    source.name,
-                )
+            else:
+                # A killed or failed ffmpeg leaves a truncated file with no moov atom — 11 GB that looks like a
+                # finished mp4 but plays as "invalid data". Remove it and keep the mkv.
+                if final.exists():
+                    try:
+                        final.unlink()
+                        log.info("removed the partial %s", final.name)
+                    except OSError as exc:
+                        log.debug("could not delete %s: %s", final, exc)
+                if result is not None:
+                    log.warning(
+                        "remux failed (%s); keeping %s",
+                        (result.stderr or "").strip()[:200] or f"exit {result.returncode}",
+                        source.name,
+                    )
     if not remuxed:
         if source.suffix.lower() != TARGET_SUFFIX:
             final = target_dir / f"{name}{source.suffix.lower()}"

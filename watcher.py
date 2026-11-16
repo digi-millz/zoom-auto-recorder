@@ -88,6 +88,9 @@ class DialogWatcher:
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
     _thread: threading.Thread | None = field(default=None, repr=False)
     _unmatched: dict[int, tuple[str, float]] = field(default_factory=dict, repr=False)
+    # hwnd -> signature already reported. Without it an unchanged unknown dialog re-alerted (and re-screenshotted)
+    # every alert_after seconds: 346 PNGs / 18 MB in 20 minutes on the 2026-11-15 prejoin window.
+    _alerted: dict[int, str] = field(default_factory=dict, repr=False)
     _typed: dict[int, int] = field(default_factory=dict, repr=False)
     _email_warned: bool = field(default=False, repr=False)
 
@@ -274,13 +277,18 @@ class DialogWatcher:
         now: float,
         capture: win_capture.Capture,
     ) -> None:
+        if self._alerted.get(window.hwnd) == signature:
+            return
         previous = self._unmatched.get(window.hwnd)
         if previous is None or previous[0] != signature:
+            # New text in this window: it is a different problem than the one already reported.
+            self._alerted.pop(window.hwnd, None)
             self._unmatched[window.hwnd] = (signature, now)
             return
         if now - previous[1] < self.alert_after:
             return
         self._unmatched.pop(window.hwnd, None)
+        self._alerted[window.hwnd] = signature
         text = " / ".join(
             line.strip()
             for line in (dialogs.signature(words).replace("|", "\n")).splitlines()

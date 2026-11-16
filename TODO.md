@@ -60,6 +60,11 @@ machine cannot provide: a live meeting, your unlocked session, or Task Scheduler
 - [x] Repeats badged on **every** occurrence in the UI calendar (`/api/occurrences`, `recurrence.occurrences_between`)
 - [x] OCR ladder pinned in `requirements.txt`; without it the watcher was blind and every join stalled (2026-11-15)
 - [x] OBS program scene made live before recording — black recordings had valid streams and luma 0 (2026-11-15)
+- [x] Small frames are OCR'd at 2× — the prejoin "Join" label is invisible at 1:1, which cost the 21:00 meeting
+      (exit 4); boxes are divided back so clicks still land (`ocr._scale_words`, 2026-11-15)
+- [x] One alert per unchanged unknown dialog (346 PNGs / 18 MB in 20 minutes before, 2026-11-15)
+- [x] Remux patience scales with file size, `+faststart` is skipped above 4 GB, and a failed remux deletes its
+      partial mp4 (an 11 GB header-less file was left beside the good mkv, 2026-11-15)
 
 ## Verification notes
 

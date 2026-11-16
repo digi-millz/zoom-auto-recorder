@@ -116,20 +116,49 @@ async def _recognize_async(path: str) -> list[Word]:
     return words
 
 
+# Dialogs are small and Windows OCR skips short labels at 1:1: the prejoin "Join" button (white on blue, ~11 px
+# tall) is invisible in a 650x529 capture but recognised at 2x — measured 2026-11-15 on the 21:00 prejoin window,
+# where the missing word cost the whole meeting. Boxes are divided back so callers keep working in capture pixels.
+UPSCALE_BELOW = 1000
+UPSCALE = 2
+
+
+def _scale_words(found: list[Word], scale: int) -> list[Word]:
+    """Map boxes recognised on an upscaled frame back onto the original frame."""
+    if scale == 1:
+        return found
+    return [
+        Word(
+            text=word.text,
+            x=word.x // scale,
+            y=word.y // scale,
+            width=max(1, word.width // scale),
+            height=max(1, word.height // scale),
+            line=word.line,
+        )
+        for word in found
+    ]
+
+
 def words(image: Image.Image) -> list[Word]:
-    """Recognise ``image`` and return its words. Never raises: failure yields ``[]``."""
+    """Recognise ``image`` and return its words, in the coordinates of ``image``. Never raises: failure is ``[]``."""
     if image.width > MAX_SIDE or image.height > MAX_SIDE:
         log.warning("frame too large for OCR (%sx%s)", image.width, image.height)
         return []
     if image.width < 40 or image.height < 40:
         return []
 
+    scale = UPSCALE if max(image.size) < UPSCALE_BELOW else 1
+    frame = image.convert("RGB")
+    if scale > 1:
+        frame = frame.resize((image.width * scale, image.height * scale), Image.LANCZOS)
+
     fd, path = tempfile.mkstemp(suffix=".png", prefix="zar-ocr-")
     os.close(fd)
     try:
-        image.convert("RGB").save(path, "PNG")
+        frame.save(path, "PNG")
         # pywinrt async objects are awaitable; a private loop is cheap and keeps callers synchronous.
-        return asyncio.run(_recognize_async(path))
+        return _scale_words(asyncio.run(_recognize_async(path)), scale)
     except Exception as exc:  # pragma: no cover - runtime/OS dependent
         log.warning("OCR failed: %s: %s", type(exc).__name__, exc)
         return []

@@ -155,3 +155,22 @@ Still unproven: the `close_grace` branch (meeting window disappears while `Zoom.
 CEF waiting-room window with `WM_CLOSE` did not actually close it, so the recorder correctly kept running —
 `select_meeting_window` requires a visible window. The process-exit branch above covers the same code path minus
 the `find_process()` check.
+
+### 21:00 entry — the prejoin "Join" button was invisible to OCR
+
+`ed90d84f` (Wealth Workshop Pre-Kick Off Call) ended **exit 4** after the 300 s join timeout. Zoom *had* opened the
+prejoin window; the watcher never clicked Join, so no meeting window ever existed. Re-running the matcher offline on
+that run's own screenshot:
+
+| Input | OCR | `dialogs.pick` |
+| --- | --- | --- |
+| 646×524 capture, as-is | 17 words, **no "Join"** ("Backgrounds", "Always show this preview when joining" both read) | `None` |
+| same frame at 2× (Lanczos) | 18 words, `Join` at `(547,474,27,10)` | `Click(rule='prejoin', label='Join', x=560, y=479)` |
+
+White-on-blue button labels below ~16 px are dropped by `Windows.Media.Ocr`; that is why `ocr.words` now upscales
+frames under 1000 px by 2 and divides the boxes back. Same run, two more measured defects: the unchanged prejoin
+window re-alerted every ~7 s (**346 PNGs, 18 MB**), and the 16:00 recording — 11.6 GB / 4 h 12 m — lost its remux to
+a fixed 600 s ffmpeg timeout, which left an **11 GB mp4 with no moov atom** ("Invalid data") beside the good mkv.
+
+Fixes: alerts are remembered per window signature; the remux timeout scales with file size (1449 s for that file),
+`+faststart` is skipped above 4 GB, and a failed remux deletes its partial output.
