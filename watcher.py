@@ -245,6 +245,11 @@ class DialogWatcher:
         x, y = capture.to_screen(*target.center)
         self._shot(window, "before-email", capture.image)
         log.info("typing the prejoin email into %s at (%d, %d)", window.cls, x, y)
+        # A synthetic click hits whatever is on top at that point, not this window: without raising the prompt first
+        # the field never took focus and the keystrokes went to another window. That is exactly how the 09:00 run
+        # produced "email entry not confirmed" twice and then clicked a disabled Join (2026-11-16).
+        self.focus(window.hwnd)
+        self.sleep(0.15)
         self.click(x, y)
         # CEF needs a moment to move focus into the field; typing 250 ms after the click landed in nothing.
         self.sleep(0.5)

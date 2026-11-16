@@ -496,6 +496,16 @@ class RunnerLock:
                 continue
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(str(os.getpid()))
+            # Owning the create is not owning the lock: another process can unlink this file between our O_EXCL and
+            # this line (a stale-lock reclaim, or a hand-deleted lock — both seen live 2026-11-16, two runners and
+            # two concurrent Zoom joins) and write its own pid. Only the pid on disk means we hold it.
+            try:
+                owner = int(self.path.read_text(encoding="utf-8").strip() or 0)
+            except (OSError, ValueError):
+                owner = 0
+            if owner != os.getpid():
+                log.warning("lost the runner lock to pid %s while claiming it", owner or "?")
+                return False
             self._held = True
             return True
         return False

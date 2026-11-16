@@ -65,6 +65,10 @@ machine cannot provide: a live meeting, your unlocked session, or Task Scheduler
 - [x] One alert per unchanged unknown dialog (346 PNGs / 18 MB in 20 minutes before, 2026-11-15)
 - [x] Remux patience scales with file size, `+faststart` is skipped above 4 GB, and a failed remux deletes its
       partial mp4 (an 11 GB header-less file was left beside the good mkv, 2026-11-15)
+- [x] The prejoin email path raises the prompt before clicking the field, like the dismiss path always did — without
+      it the click hit another window, the keystrokes vanished and Join stayed disabled (2026-11-16 09:00, exit 4)
+- [x] `RunnerLock.acquire` re-reads the file and only counts the lock as held when the pid on disk is its own, so a
+      replaced or hand-deleted lock cannot leave two runners recording the same entry (2026-11-16)
 
 ## Verification notes
 

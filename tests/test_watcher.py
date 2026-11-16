@@ -116,6 +116,28 @@ class ClickTests(unittest.TestCase):
         self.assertEqual(watcher.stats.alerts, 1, "alert once, not on every poll")
         self.assertIn("connection", watcher.alerts[0].text)
 
+    def test_the_email_prompt_is_raised_before_clicking_the_field(self) -> None:
+        # 2026-11-16 09:00: the click landed on whatever was on top, the field never focused, the keystrokes went
+        # nowhere, Zoom kept Join disabled and the entry ended exit 4.
+        prompt = [
+            word("Enter", 60, 40), word("your", 120, 40), word("email", 170, 40), word("and", 230, 40),
+            word("name", 270, 40), word("Your", 60, 120), word("email", 130, 120),
+        ]
+        desktop = FakeDesktop([prompt, prompt])
+        desktop.windows = [window(cls="zWaitingMeetingIDWndClass", title="Zoom Workplace")]
+        watcher = make_watcher(desktop, email="me@example.com")
+        watcher.poll_once()
+        self.assertEqual(desktop.order[:2], ["focus", "click"])
+
+    def test_email_typing_without_focus_is_not_counted_as_typed(self) -> None:
+        prompt = [word("Enter", 60, 40), word("your", 120, 40), word("Your", 60, 120), word("email", 130, 120)]
+        desktop = FakeDesktop([prompt, prompt])
+        desktop.windows = [window(cls="zWaitingMeetingIDWndClass", title="Zoom Workplace")]
+        watcher = make_watcher(desktop, email="me@example.com")
+        watcher.poll_once()
+        # Nothing came back from the field in this fake, so it must not claim success.
+        self.assertEqual(watcher.stats.typed, 0)
+
     def test_an_unchanged_unknown_dialog_alerts_once_not_every_alert_after(self) -> None:
         # 346 screenshots / 18 MB in 20 minutes on the 2026-11-15 prejoin window: it re-alerted every ~7 s.
         desktop = FakeDesktop([[word("Your", 60, 40), word("connection", 150, 40)]] * 6)

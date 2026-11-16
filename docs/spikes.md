@@ -174,3 +174,23 @@ a fixed 600 s ffmpeg timeout, which left an **11 GB mp4 with no moov atom** ("In
 
 Fixes: alerts are remembered per window signature; the remux timeout scales with file size (1449 s for that file),
 `+faststart` is skipped above 4 GB, and a failed remux deletes its partial output.
+
+### 2026-11-16 09:00 — the prejoin email never landed
+
+`da6a1c0d` ended **exit 4** after 300 s. Zoom's "Enter your email and name" prompt was on screen; the log repeated
+`email entry not confirmed in zWaitingMeetingIDWndClass; will retry once`, and then the watcher clicked "Join meeting"
+four times with `click NOT verified` — the button is disabled while the field is empty, so nothing ever moved.
+
+Three causes, in order of weight:
+
+1. **`_fill_prejoin` never raised the window.** The dismiss path calls `focus(hwnd)` before clicking because a
+   synthetic click lands on whatever is on top; the email path did not, so the click hit another window, the CEF field
+   never took focus, and the keystrokes went nowhere. Fixed: focus, settle 150 ms, click, settle 500 ms, type, and the
+   address itself must appear in the re-read.
+2. **Two live watchers.** At 11:39 screenshots were written to both `_shots/20261115-210000` and
+   `_shots/20261116-090000`, and OCR logged `Another RecognizeAsync operation is already running!` — two sessions
+   were polling at once, stealing focus and clicks from each other. Two runners had been started while the lock file
+   was being deleted by hand during diagnosis. `RunnerLock.acquire` now re-reads the file and only counts the lock as
+   held if the pid on disk is its own.
+3. **The process predated the OCR fix.** The runner had been started at 13:57 the day before, so it was still running
+   the pre-upscale `ocr.words` (and the old remux timeout).
