@@ -54,6 +54,10 @@ the road.
    only pin removed code.
 8. **Failures are states, not exceptions.** `missed`, `needs_attention`, exit codes 0–9. A silent no-file is a
    bug; a logged, alarmed no-file is acceptable.
+9. **Close what you open.** A test that launches Zoom, starts a recording, opens a browser tab or a probe must end
+   with that window closed, that process gone and its artifacts deleted — in a `finally`, before reporting, not
+   "later". Leave running only what the product needs (the runner, the UI, OBS) and say which those are. A rehearsal's
+   waiting room left on the user's desktop is a bug, and a 60 s test take left in `recordings/` is litter.
 
 ## Windows gotchas (already bitten)
 
