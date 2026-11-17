@@ -317,6 +317,29 @@ class RecordingNameTests(unittest.TestCase):
         self.assertEqual(cli._recording_title("", "https://example.com/whatever"), "meeting")
 
 
+class RollForwardTests(unittest.TestCase):
+    """A repeating entry must be re-armed after a run, whatever kind of rule it carries."""
+
+    def test_an_rrule_entry_is_rolled(self) -> None:
+        # The UI's repeat builder writes `rrule` and leaves `repeat` empty; checking only `repeat` stopped the daily
+        # "Road to Payouts" meeting after its first failure (2026-11-17).
+        entry = cli.Entry(id="a", url="u", start="2026-11-17 09:00", rrule="FREQ=DAILY")
+        self.assertTrue(cli._should_roll(entry, False, False))
+
+    def test_a_legacy_repeat_entry_is_still_rolled(self) -> None:
+        entry = cli.Entry(id="b", url="u", start="2026-11-17 09:00", repeat="weekly")
+        self.assertTrue(cli._should_roll(entry, False, False))
+
+    def test_a_one_off_entry_is_not_rolled(self) -> None:
+        entry = cli.Entry(id="c", url="u", start="2026-11-17 09:00")
+        self.assertFalse(cli._should_roll(entry, False, False))
+
+    def test_an_interrupted_or_stopping_run_is_not_rolled(self) -> None:
+        entry = cli.Entry(id="d", url="u", start="2026-11-17 09:00", rrule="FREQ=DAILY")
+        self.assertFalse(cli._should_roll(entry, True, False))
+        self.assertFalse(cli._should_roll(entry, False, True))
+
+
 class WaitingRoomTimeoutTests(unittest.TestCase):
     def test_zero_timeout_waits_forever(self) -> None:
         self.assertFalse(cli.waiting_room_expired(0.0, 99999.0, 0))

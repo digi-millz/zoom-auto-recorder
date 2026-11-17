@@ -1606,6 +1606,15 @@ def edit_meeting(
         console.print(f"  into: {updated.output_dir}")
 
 
+def _should_roll(entry: Entry, interrupted: bool, stopping: bool) -> bool:
+    """Re-arm a repeating entry after a run.
+
+    Any rule counts — the legacy ``repeat`` string *or* an RRULE. Checking only ``repeat`` meant an entry created by
+    the UI's repeat builder (which writes ``rrule`` and leaves ``repeat`` empty) recorded once and then never again;
+    the daily "Road to Payouts" meeting was not re-armed after its failed 09:00 run (2026-11-17).
+    """
+    return bool(entry.rrule or entry.repeat) and not interrupted and not stopping
+
 @dataclass(frozen=True)
 class EntryOutcome:
     """What the runner should do after one entry: count a failure, stop, or carry on."""
@@ -1710,7 +1719,7 @@ def _record_entry(
         f", saved {result.path}" if result.path else "",
     )
     postprocess.prune(output, retention_days)
-    if entry.repeat and not result.interrupted and not stop_requested(schedule.path):
+    if _should_roll(entry, result.interrupted, stop_requested(schedule.path)):
         rolled = schedule.roll_repeat(entry.id)
         if rolled is not None:
             log.info("next occurrence of %s: %s", entry.id, rolled.start)
