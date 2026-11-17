@@ -69,6 +69,10 @@ machine cannot provide: a live meeting, your unlocked session, or Task Scheduler
       it the click hit another window, the keystrokes vanished and Join stayed disabled (2026-11-16 09:00, exit 4)
 - [x] `RunnerLock.acquire` re-reads the file and only counts the lock as held when the pid on disk is its own, so a
       replaced or hand-deleted lock cannot leave two runners recording the same entry (2026-11-16)
+- [x] Recordings are named after the meeting topic the prejoin window showed, not the meeting id: the 18:00 file
+      came out as `zoom-89538600487` although Zoom had displayed "Day 1 of Wealth Workshop" (2026-11-16)
+- [x] The "This meeting is being recorded → OK" notice is clicked (`0K` accepted, which is how OCR reads it) and the
+      note-taking / stage / ATL windows are never scanned, clicked or screenshotted (2026-11-16)
 
 ## Verification notes
 

@@ -153,18 +153,20 @@ def _obs_password(flag_value: str | None) -> str:
     return (flag_value or "").rstrip("\r\n")
 
 
-GENERIC_WINDOW_TITLES = {"zoom workplace", "zoom meeting", "zoom webinar", ""}
 
-
-def _recording_title(window_title: str, url: str) -> str:
+def _recording_title(window_title: str, url: str, preferred: str | None = None) -> str:
     """A name for the file: the meeting topic when Zoom exposes one, else the meeting id.
 
     The waiting room and webinar windows are titled "Zoom Workplace" / "Zoom Webinar", which would name every
-    recording the same thing — the meeting id from the join link is stable and tells them apart.
+    recording the same thing. Before falling back to the meeting id, *preferred* is used — the topic the prejoin
+    window showed ("Day 1 of Wealth Workshop"), which is what a person would have named the file.
     """
     title = (window_title or "").strip()
-    if title.lower() not in GENERIC_WINDOW_TITLES:
+    if title.lower() not in dialogs.GENERIC_TITLES:
         return title
+    hint = (preferred or "").strip()
+    if hint.lower() not in dialogs.GENERIC_TITLES:
+        return hint
     target = to_zoommtg(url) or ""
     match = re.search(r"confno=(\d+)", target)
     return f"zoom-{match.group(1)}" if match else (title or "meeting")
@@ -879,7 +881,7 @@ def _record_session(
                     Path(partial),
                     output_path,
                     session_started,
-                    _part_title(_recording_title(alive.title, url), part_index),
+                    _part_title(_recording_title(alive.title, url, watcher.prejoin_title), part_index),
                 )
                 log.info(
                     "part %d kept: %s (%.0fs)",
@@ -957,7 +959,7 @@ def _record_session(
                     Path(saved_path),
                     output_path,
                     session_started,
-                    _part_title(_recording_title(window.title, url), part_index),
+                    _part_title(_recording_title(window.title, url, watcher.prejoin_title), part_index),
                 )
                 saved_path = str(recording.path)
                 log.info(

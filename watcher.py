@@ -85,6 +85,10 @@ class DialogWatcher:
     stats: Stats = field(default_factory=Stats)
     logbook: dialogs.ClickLog = field(default_factory=dialogs.ClickLog)
     alerts: list[WatcherAlert] = field(default_factory=list)
+    # The prejoin window is the one place Zoom prints the meeting topic ("Day 1 of Wealth Workshop"). The meeting
+    # and waiting-room windows say "Zoom Workplace", which is why a real recording ended up named after its meeting
+    # id (2026-11-16 18:00). The recorder reads this back when it names the file.
+    prejoin_title: str | None = None
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
     _thread: threading.Thread | None = field(default=None, repr=False)
     _unmatched: dict[int, tuple[str, float]] = field(default_factory=dict, repr=False)
@@ -121,6 +125,9 @@ class DialogWatcher:
         scope = dialogs.scope_for_class(window.cls)
         if scope == "other":
             return 0
+        title = (window.title or "").strip()
+        if scope == "prejoin" and self.prejoin_title is None and title.lower() not in dialogs.GENERIC_TITLES:
+            self.prejoin_title = title
         capture = self.grab(window.hwnd)
         if capture is None:
             log.debug("hwnd=%#x %r not capturable", window.hwnd, window.cls)

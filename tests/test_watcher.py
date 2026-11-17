@@ -87,6 +87,22 @@ class FocusOrderTests(unittest.TestCase):
             "an absolute click lands on whatever is on top, so the dialog must be raised first",
         )
 
+    def test_the_prejoin_topic_is_remembered_for_the_file_name(self) -> None:
+        prompt = [word("Your", 60, 40), word("email", 130, 40)]
+        desktop = FakeDesktop([prompt, prompt])
+        desktop.windows = [window(cls="VideoPreviewWndClass", title="Day 1 of Wealth Workshop")]
+        watcher = make_watcher(desktop, email="me@example.com")
+        watcher.poll_once()
+        self.assertEqual(watcher.prejoin_title, "Day 1 of Wealth Workshop")
+
+    def test_a_generic_title_is_not_used_as_the_topic(self) -> None:
+        prompt = [word("Your", 60, 40), word("email", 130, 40)]
+        desktop = FakeDesktop([prompt, prompt])
+        desktop.windows = [window(cls="VideoPreviewWndClass", title="Zoom Workplace")]
+        watcher = make_watcher(desktop, email="me@example.com")
+        watcher.poll_once()
+        self.assertIsNone(watcher.prejoin_title)
+
 
 class ClickTests(unittest.TestCase):
     def test_clicks_the_acknowledge_label_once(self) -> None:

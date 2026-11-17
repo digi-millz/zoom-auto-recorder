@@ -430,6 +430,9 @@ Run these once on the target machine; they cannot be automated here.
 - The recording container is forced to **mkv** before every start. Measured: force-killing OBS during an
   `hybrid_mp4` recording leaves a **0-byte** file (the footer is written on shutdown), while mkv keeps everything
   written so far; `postprocess` remuxes it to mp4 afterwards.
+- The file is named `<date>_<time>_<topic>.mp4`. The topic comes from the meeting window; when that window is only
+  "Zoom Workplace" (waiting room) the **prejoin window's** topic is used — that is what carries "Day 1 of Wealth
+  Workshop" — and only when neither has one does the meeting id become the name (`zoom-89538600487`).
 - If OBS dies (or its socket drops) mid-meeting, the recorder relaunches OBS, keeps the finished part and resumes
   into a `…-part-2` file — up to two resumes per meeting. A part shorter than OBS's first flushed frame is
   discarded rather than left as a 0-byte file.

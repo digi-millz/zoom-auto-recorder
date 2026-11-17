@@ -79,6 +79,10 @@ SCOPE_CLASSES: dict[str, frozenset[str]] = {
 # ("ATL:00007FFFB743AD70", title "VideoPortContainer").
 _IGNORED_PREFIXES = ("ATL:",)
 
+# Titles Zoom puts on every window, so they cannot name a recording. The prejoin window, by contrast, carries the
+# meeting topic ("Day 1 of Wealth Workshop") — that is what a file should be called.
+GENERIC_TITLES = frozenset({"zoom workplace", "zoom meeting", "zoom webinar", ""})
+
 
 def scope_for_class(cls: str, default: str = "dialog") -> str:
     """Which rule scope applies to a window class (``dialog``/``prejoin``/``meeting``/``other``).

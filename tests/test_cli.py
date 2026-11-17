@@ -287,6 +287,32 @@ class RecordingNameTests(unittest.TestCase):
             "Live Chart Watching",
         )
 
+    def test_the_prejoin_topic_names_the_file_when_the_window_is_generic(self) -> None:
+        # 2026-11-16 18:00: the meeting window said "Zoom Workplace", so a real recording was named after its id even
+        # though the prejoin window had shown "Day 1 of Wealth Workshop".
+        self.assertEqual(
+            cli._recording_title(
+                "Zoom Workplace", "https://us02web.zoom.us/j/89538600487", "Day 1 of Wealth Workshop"
+            ),
+            "Day 1 of Wealth Workshop",
+        )
+
+    def test_a_real_window_title_beats_the_hint(self) -> None:
+        self.assertEqual(
+            cli._recording_title(
+                "ConfMultiTabContentWndClass", "https://us02web.zoom.us/j/89538600487", "Day 1"
+            ),
+            "ConfMultiTabContentWndClass",
+        )
+
+    def test_a_generic_hint_still_falls_back_to_the_meeting_id(self) -> None:
+        self.assertEqual(
+            cli._recording_title(
+                "Zoom Workplace", "https://us02web.zoom.us/j/89538600487", "Zoom Workplace"
+            ),
+            "zoom-89538600487",
+        )
+
     def test_unparseable_link_still_names_the_file(self) -> None:
         self.assertEqual(cli._recording_title("", "https://example.com/whatever"), "meeting")
 
