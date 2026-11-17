@@ -85,6 +85,43 @@ class ArgumentTests(unittest.TestCase):
             self.assertEqual(recording.path.suffix, ".mkv")
 
 
+
+class PictureCheckTests(unittest.TestCase):
+    """A file with valid streams can still be black; the check must look at a frame, not the metadata."""
+
+    def test_sample_point_is_ten_percent_clamped(self) -> None:
+        self.assertEqual(postprocess.sample_at(0), 1.0)
+        self.assertEqual(postprocess.sample_at(5), 1.0)      # 0.5 s clamp up
+        self.assertEqual(postprocess.sample_at(120), 12.0)   # 10 %
+        self.assertEqual(postprocess.sample_at(4000), 30.0)  # clamp down
+
+    def _video(self, root: Path, colour: str) -> Path:
+        path = root / f"{colour}.mp4"
+        subprocess.run(
+            [
+                postprocess.shutil.which("ffmpeg"), "-v", "error", "-y",
+                "-f", "lavfi", "-i", f"color=c={colour}:s=160x90:d=1",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        return path
+
+    def test_a_black_file_reads_black_and_a_coloured_one_does_not(self) -> None:
+        if postprocess.shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg not on PATH")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            black = postprocess.sample_luma(self._video(root, "black"))
+            white = postprocess.sample_luma(self._video(root, "white"))
+        self.assertIsNotNone(black)
+        self.assertIsNotNone(white)
+        assert black is not None and white is not None
+        self.assertLessEqual(black, postprocess.BLACK_FRAME_LUMA)
+        self.assertGreater(white, postprocess.BLACK_FRAME_LUMA)
+
 class ProbeParsingTests(unittest.TestCase):
     def test_reads_duration_and_stream_kinds(self) -> None:
         payload = (

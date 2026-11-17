@@ -962,17 +962,36 @@ def _record_session(
                     _part_title(_recording_title(window.title, url, watcher.prejoin_title), part_index),
                 )
                 saved_path = str(recording.path)
+                picture = postprocess.sample_luma(recording.path)
                 log.info(
-                    "recording ready: %s (%.0fs, %.1f MB, video=%s audio=%s%s)",
+                    "recording ready: %s (%.0fs, %.1f MB, video=%s audio=%s, picture=%s%s)",
                     recording.path,
                     recording.duration_sec,
                     recording.size_bytes / 1_000_000,
                     recording.has_video,
                     recording.has_audio,
+                    "unknown" if picture is None else picture,
                     ", remuxed" if recording.remuxed else "",
                 )
                 if not recording.ok:
                     exit_code = exit_code or EXIT_NO_FILE
+                elif picture is not None and picture <= postprocess.BLACK_FRAME_LUMA:
+                    # Valid streams, valid duration, black picture: exactly the file that slipped through on
+                    # 2026-11-15 because nothing looked at the frames after the session.
+                    log.error(
+                        "needs_attention: the finished file is black (max luma %s): %s",
+                        picture,
+                        recording.path,
+                    )
+                    notify.send(
+                        notify_url,
+                        notify.Event(
+                            notify.NEEDS_ATTENTION,
+                            meeting=_recording_title(window.title, url, watcher.prejoin_title),
+                            path=str(recording.path),
+                            detail=f"recording is black (max luma {picture})",
+                        ),
+                    )
             else:
                 log.error(
                     "no recording file found in %s or OBS's folder", output_path

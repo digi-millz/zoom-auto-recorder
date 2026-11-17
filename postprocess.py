@@ -199,6 +199,54 @@ def inspect(path: Path) -> tuple[float, bool, bool]:
     return parse_probe(result.stdout)
 
 
+# A frame whose brightest pixel is at or below this is black: the recorder's own threshold is the same idea.
+BLACK_FRAME_LUMA = 8
+
+
+def sample_at(duration_sec: float) -> float:
+    """Where to sample a finished recording: 10 % in, clamped so short takes still get a real frame."""
+    if duration_sec <= 0:
+        return 1.0
+    return max(1.0, min(30.0, duration_sec * 0.1))
+
+
+def sample_luma(path: Path, at: float | None = None) -> int | None:
+    """Brightest pixel in one frame of *path*, or ``None`` when ffmpeg/Pillow cannot produce one.
+
+    The recorder checks the live OBS source during a session; this checks the **file**, which is what the user will
+    actually open. A black file with valid streams is exactly the failure that went unnoticed on 2026-11-15.
+    """
+    binary = shutil.which("ffmpeg")
+    if binary is None:
+        return None
+    path = Path(path)
+    duration = inspect(path)[0]
+    moment = sample_at(duration if at is None else at)
+    if duration > 0:
+        # Seeking to (or past) the end yields no frame: a 1-second test clip sampled at 1.0 s came back empty.
+        moment = min(moment, duration / 2)
+    args = [binary, "-v", "error", "-ss", f"{moment:.1f}", "-i", str(path),
+            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]
+    try:
+        result = subprocess.run(args, capture_output=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("could not sample a frame from %s: %s", path, exc)
+        return None
+    if result.returncode != 0 or not result.stdout:
+        log.warning("ffmpeg produced no frame from %s: %s", path, (result.stderr or b"").decode()[:160])
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(result.stdout)) as image:
+            _low, high = image.convert("L").getextrema()
+        return int(high)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a recording
+        log.debug("could not read the sampled frame: %s", exc)
+        return None
+
 def finalize(
     source: Path,
     target_dir: Path,
