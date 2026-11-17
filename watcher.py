@@ -80,6 +80,7 @@ class DialogWatcher:
     focus: Callable[[int], None] = window_manager.force_foreground
     email: str | None = None
     type_text: Callable[[str], None] = window_manager.type_text
+    clear: Callable[[], None] = window_manager.clear_field
     windows: Callable[[str], list[window_manager.WindowInfo]] = window_manager.iter_windows
     sleep: Callable[[float], None] = time.sleep
     stats: Stats = field(default_factory=Stats)
@@ -260,6 +261,9 @@ class DialogWatcher:
         self.click(x, y)
         # CEF needs a moment to move focus into the field; typing 250 ms after the click landed in nothing.
         self.sleep(0.5)
+        # Empty whatever is there first: a retry used to append, leaving "me@example.comme@example.com…".
+        self.clear()
+        self.sleep(0.15)
         self.type_text(self.email)
         self._typed[window.hwnd] = self._typed.get(window.hwnd, 0) + 1
         self.sleep(0.6)
@@ -267,17 +271,36 @@ class DialogWatcher:
         after = self.grab(window.hwnd)
         landed = False
         if after is not None:
-            after_text = " ".join(word.text for word in self.read_words(after.image)).lower()
             self._shot_hwnd(window.hwnd, "after-email", after.image)
-            # The address itself must be readable in the field. "the text changed somehow" was true when the click
-            # merely moved focus, which made a still-empty field look filled and the Join click a no-op.
-            landed = _squash(self.email).lower() in _squash(after_text)
+            # The address must appear on the line that was clicked, exactly once. "It appears somewhere in the
+            # window" was satisfied when the keystrokes went to the *name* field, and a doubled address
+            # ("…com…com") is a field we must clear rather than accept.
+            landed = self._address_in_field(self.read_words(after.image), target.center[1])
         if landed:
             self.stats.typed += 1
             log.info("email entry confirmed in %s; the next poll can press Join", window.cls)
         else:
             log.warning("email entry not confirmed in %s; will retry once", window.cls)
         return True
+
+    def _address_in_field(
+        self, words: Sequence[ocr.Word], field_y: int, tolerance: int = 25
+    ) -> bool:
+        """True only when the address sits on the line that was clicked, exactly once.
+
+        Two failure modes this rejects: keystrokes landing in the *name* field (the address then appears elsewhere
+        in the window) and a doubled address from typing into a field that was not empty.
+        """
+        wanted = _squash(self.email).lower()
+        if not wanted:
+            return False
+        for line in dialogs.lines_of(words):
+            centre = line.box.y + line.box.height / 2
+            if abs(centre - field_y) > tolerance:
+                continue
+            squashed = _squash(line.text).lower()
+            return squashed.count(wanted) == 1 and squashed.count("@") == 1
+        return False
 
 
     # -- alerts -------------------------------------------------------------

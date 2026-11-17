@@ -54,6 +54,9 @@ class FakeDesktop:
         self.order.append("click")
         self.clicks.append((x, y))
 
+    def clear(self) -> None:
+        self.order.append("clear")
+
     def alive(self, hwnd: int) -> bool:
         return True
 
@@ -64,6 +67,7 @@ def make_watcher(desktop: FakeDesktop, rules=None, **kwargs) -> DialogWatcher:
         grab=desktop.grab,
         read_words=desktop.read,
         click=desktop.click,
+        clear=desktop.clear,
         alive=desktop.alive,
         focus=desktop.focus,
         windows=lambda _process: desktop.windows,
@@ -122,6 +126,7 @@ class ClickTests(unittest.TestCase):
         watcher.poll_once()
         self.assertEqual(watcher.stats.unverified, 1)
         self.assertEqual(watcher.stats.verified, 0)
+
 
     def test_unknown_dialog_never_clicks(self) -> None:
         desktop = FakeDesktop([[word("Your", 60, 40), word("connection", 150, 40), word("is", 300, 40)]])
@@ -221,6 +226,37 @@ class ClickTests(unittest.TestCase):
             self.assertTrue(any("before" in f for f in files))
             self.assertTrue(any("after" in f for f in files))
 
+
+class PrejoinEmailTests(unittest.TestCase):
+    """The field must be cleared, and the address must land on the line that was clicked — exactly once."""
+
+    PROMPT = [word("Your", 60, 120, 1), word("email", 130, 120, 1)]
+
+    def _watcher(self, after: list[Word]):
+        desktop = FakeDesktop([self.PROMPT, after])
+        desktop.windows = [window(cls="zWaitingMeetingIDWndClass", title="Zoom Workplace")]
+        return desktop, make_watcher(desktop, email="me@example.com")
+
+    def test_the_field_is_cleared_before_typing(self) -> None:
+        desktop, watcher = self._watcher([word("me@example.com", 60, 120, 1)])
+        watcher.poll_once()
+        self.assertIn("clear", desktop.order, "an existing value must be erased, never appended to")
+
+    def test_an_address_in_the_wrong_field_is_not_accepted(self) -> None:
+        # Keystrokes went into the name field: the address exists, but not on the clicked line.
+        _desktop, watcher = self._watcher([word("me@example.com", 60, 300, 3)])
+        watcher.poll_once()
+        self.assertEqual(watcher.stats.typed, 0)
+
+    def test_a_doubled_address_is_not_accepted(self) -> None:
+        _desktop, watcher = self._watcher([word("me@example.comme@example.com", 60, 120, 1)])
+        watcher.poll_once()
+        self.assertEqual(watcher.stats.typed, 0)
+
+    def test_one_clean_address_is_accepted(self) -> None:
+        _desktop, watcher = self._watcher([word("me@example.com", 60, 120, 1)])
+        watcher.poll_once()
+        self.assertEqual(watcher.stats.typed, 1)
 
 if __name__ == "__main__":
     unittest.main()

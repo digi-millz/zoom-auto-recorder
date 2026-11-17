@@ -397,6 +397,7 @@ def click_at(x: int, y: int, settle: float = 0.06) -> None:
     _user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
     time.sleep(0.04)
     _user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+VK_BACK = 0x08
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 
@@ -414,6 +415,20 @@ def type_text(text: str, per_char: float = 0.012) -> None:
         _user32.keybd_event(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0)
         if per_char:
             time.sleep(per_char)
+
+
+def clear_field(presses: int = 60) -> None:
+    """Empty the focused field by pressing Backspace, so typing never appends to what is already there.
+
+    Measured need: a retry typed the address after a previous attempt had landed, leaving
+    "me@example.comme@example.com…" in Zoom's prejoin email box. Backspace in an empty field is a no-op, so this is
+    safe even when the field is already clear.
+    """
+    _require_windows()
+    for _ in range(max(0, presses)):
+        _user32.keybd_event(VK_BACK, 0, 0, 0)
+        _user32.keybd_event(VK_BACK, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.004)
 
 
 def close_window(hwnd: int) -> None:
