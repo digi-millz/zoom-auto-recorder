@@ -65,9 +65,19 @@ SCOPE_CLASSES: dict[str, frozenset[str]] = {
             # "This meeting is being recorded." — a 1250x65 banner with no button.
             "ZDisclaimerBannerWndClass",
             "ZoomShadowFrameClass",
+            # "Note-taking is available" toast: its only button opens a panel, so clicking it is wrong.
+            "CVoiceActivityDetectedDlgCls",
+            # Child panel of the prejoin window ("audio" + device names); the parent carries the Join button.
+            "VideoPreviewFitPanelClass",
+            # Zoom's stage/animation surface — no decision ever lives here.
+            "Duilib_Anim_StageWindowClassName",
         }
     ),
 }
+
+# Per-instance class names that can never hold a decision: ATL windows carry a module address in the class
+# ("ATL:00007FFFB743AD70", title "VideoPortContainer").
+_IGNORED_PREFIXES = ("ATL:",)
 
 
 def scope_for_class(cls: str, default: str = "dialog") -> str:
@@ -76,6 +86,8 @@ def scope_for_class(cls: str, default: str = "dialog") -> str:
     Unknown classes default to ``dialog`` so a Zoom rename cannot hide a consent prompt; only classes known to be
     benign are excluded as ``other``.
     """
+    if cls.startswith(_IGNORED_PREFIXES):
+        return "other"
     for scope, classes in SCOPE_CLASSES.items():
         if cls in classes:
             return scope

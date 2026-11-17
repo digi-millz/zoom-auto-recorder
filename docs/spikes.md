@@ -194,3 +194,20 @@ Three causes, in order of weight:
    held if the pid on disk is its own.
 3. **The process predated the OCR fix.** The runner had been started at 13:57 the day before, so it was still running
    the pre-upscale `ocr.words` (and the old remux timeout).
+
+### 2026-11-16 18:00 — the join worked; the popups did not
+
+The 18:00 entry recorded end to end (`Join` clicked at score 1.00, recording active 4 s after launch, `7809 s /
+616 MB`, exit 0). What it also produced was alert noise from windows that hold no decision:
+
+| Window class | Alerts that evening | What it is | Handling |
+| --- | --- | --- | --- |
+| `Duilib_Anim_StageWindowClassName` | 462 | Zoom's stage/animation surface | ignored |
+| `ATL:00007FFFB743AD70` (`VideoPortContainer`) | 149 | ATL window with a per-instance class suffix | ignored (prefix) |
+| `VideoPreviewFitPanelClass` | 139 | child panel of the prejoin window ("audio" + devices) | ignored |
+| `CVoiceActivityDetectedDlgCls` | 16 | "Note-taking is available" toast; its only button opens a panel | ignored |
+| `zChangeNameWndClass` | 2 | **"This meeting is being recorded." → OK** | clicked (`recording-notice` rule) |
+
+The notice's button is OCR'd as **`0K`** (zero-K), not `OK` — measured on the saved screenshot, where `pick` returned
+`None` until the label list carried the misread. `dialogs.pick` now returns
+`Click(rule='recording-notice', label='0K', x=431, y=160)` for that frame, and `consent` accepts the same misread.

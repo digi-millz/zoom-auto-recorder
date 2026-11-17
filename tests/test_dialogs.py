@@ -245,6 +245,43 @@ class ScopeTests(unittest.TestCase):
         for cls in ("ZDisclaimerBannerWndClass", "ZoomShadowFrameClass", "zLeaveWndClass"):
             self.assertEqual(dialogs.scope_for_class(cls), "other", cls)
 
+    def test_noise_windows_are_never_scanned(self) -> None:
+        # 2026-11-16 18:00 produced 462 "Duilib_Anim_StageWindowClassName", 149 "ATL:…" and 16 note-taking alerts,
+        # each with a screenshot. None of them can hold a decision.
+        for cls in (
+            "CVoiceActivityDetectedDlgCls",
+            "Duilib_Anim_StageWindowClassName",
+            "VideoPreviewFitPanelClass",
+            "ATL:00007FFFB743AD70",
+        ):
+            self.assertEqual(dialogs.scope_for_class(cls), "other", cls)
+        # The parent prejoin window still carries the Join button.
+        self.assertEqual(dialogs.scope_for_class("VideoPreviewWndClass"), "prejoin")
+
+    def test_recording_notice_is_acknowledged(self) -> None:
+        # "This meeting is being recorded." with a single blue OK — the 18:00 run logged it as needs_attention.
+        words = [
+            word("This", 60, 71, 58, 26, 0),
+            word("meeting", 130, 72, 120, 33, 0),
+            word("is", 263, 72, 19, 25, 0),
+            word("being", 294, 71, 81, 34, 0),
+            word("recorded", 388, 71, 132, 26, 0),
+            word("0K", 540, 214, 40, 26, 3),
+        ]
+        click = dialogs.pick(words, self.rules, scope="prejoin")
+        self.assertIsNotNone(click)
+        assert click is not None
+        self.assertEqual(click.rule, "recording-notice")
+        self.assertEqual(click.label, "0K", "OCR reads this button as zero-K; the label list carries both")
+
+    def test_the_notice_rule_never_outranks_the_join_button(self) -> None:
+        # A prejoin window has "Join", never "OK"; the notice has "OK", never "Join" — each rule stays in its lane.
+        words = [word("Join", 540, 214, 60, 26, 3)]
+        click = dialogs.pick(words, self.rules, scope="prejoin")
+        self.assertIsNotNone(click)
+        assert click is not None
+        self.assertEqual(click.rule, "prejoin")
+
 
 class RulesFileTests(unittest.TestCase):
     def test_repo_rules_file_parses(self) -> None:

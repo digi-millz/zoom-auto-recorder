@@ -22,7 +22,7 @@
     {
       "name": "consent",
       "scope": "dialog",
-      "match": { "text": ["Acknowledge", "Continue", "Got it", "I Agree", "Agree", "OK"] },
+      "match": { "text": ["Acknowledge", "Continue", "Got it", "I Agree", "Agree", "OK", "0K"] },
       "action": { "kind": "clickText" },
       "max_fires": 3,
       "threshold": 0.85
@@ -33,6 +33,13 @@
       "match": { "text": ["Join with Computer Audio", "Join Audio by Computer", "Use Computer Audio"] },
       "action": { "kind": "clickText" },
       "max_fires": 2
+    },
+    {
+      "name": "recording-notice",
+      "scope": "prejoin",
+      "match": { "text": ["OK", "0K", "Okay", "Got it"] },
+      "action": { "kind": "clickText" },
+      "max_fires": 1
     },
     {
       "name": "prejoin",
