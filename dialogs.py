@@ -81,7 +81,22 @@ _IGNORED_PREFIXES = ("ATL:",)
 
 # Titles Zoom puts on every window, so they cannot name a recording. The prejoin window, by contrast, carries the
 # meeting topic ("Day 1 of Wealth Workshop") — that is what a file should be called.
-GENERIC_TITLES = frozenset({"zoom workplace", "zoom meeting", "zoom webinar", ""})
+GENERIC_TITLES = frozenset(
+    {
+        "zoom workplace",
+        "zoom meeting",
+        "zoom webinar",
+        "",
+        # Transient states, not topics. Three recordings from 11-17…11-19 were saved as `…_connecting.mp4` because
+        # the prejoin window's title was "Connecting" at the moment it was first seen.
+        "connecting",
+        "connecting…",
+        "connecting...",
+        "connecting to meeting",
+        "joining",
+        "please wait",
+    }
+)
 
 
 def scope_for_class(cls: str, default: str = "dialog") -> str:

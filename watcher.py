@@ -127,7 +127,9 @@ class DialogWatcher:
         if scope == "other":
             return 0
         title = (window.title or "").strip()
-        if scope == "prejoin" and self.prejoin_title is None and title.lower() not in dialogs.GENERIC_TITLES:
+        # Keep the newest real topic: Zoom briefly titles the prejoin window "Connecting", and the topic only appears
+        # once the meeting is resolved, so a first-wins rule would freeze on the transient one.
+        if scope == "prejoin" and title.lower() not in dialogs.GENERIC_TITLES:
             self.prejoin_title = title
         capture = self.grab(window.hwnd)
         if capture is None:
