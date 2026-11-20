@@ -12,7 +12,7 @@ import tempfile
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable, NoReturn
@@ -1738,6 +1738,7 @@ def _record_entry(
         f", saved {result.path}" if result.path else "",
     )
     postprocess.prune(output, retention_days)
+    postprocess.prune_shots(output, retention_days)
     if _should_roll(entry, result.interrupted, stop_requested(schedule.path)):
         rolled = schedule.roll_repeat(entry.id)
         if rolled is not None:
@@ -2041,20 +2042,22 @@ WATCHDOG_TASK_SUFFIX = "-watch"
 WATCHDOG_MAX_MINUTES = 10
 
 
-def build_watchdog_args(
+def build_watchdog_xml(
     *,
-    name: str,
     schedule_path: str | Path,
     output_dir: str | Path,
     log_file: str | Path | None = None,
     python_exe: str | Path | None = None,
     minutes: int = 5,
-) -> list[str]:
-    """``schtasks /Create`` for the periodic ``run --drain`` that covers a dead resident runner.
+    start_boundary: str | None = None,
+) -> str:
+    """Task Scheduler XML for the periodic ``run --drain`` that covers a dead resident runner.
 
-    It takes the runner lock when it fires, so a live resident runner makes it exit immediately with "another runner
-    holds …"; when nothing holds the lock it records what is due, marks the rest ``missed`` and exits. That turns
-    "no runner, no file, no alarm" into a logged state.
+    XML rather than ``schtasks /SC MINUTE /TR``: ``/TR`` is capped at 261 characters and the absolute drain command
+    with interpreter, script, schedule, output and log paths exceeds it — measured live on 2026-11-20
+    (``ERROR: Value for '/TR' option cannot be more than 261 character(s)``), which left the logon task registered
+    with no watchdog. The task takes the runner lock when it fires, so a live resident runner makes it exit with
+    "another runner holds …"; otherwise it records what is due and marks the rest ``missed``.
     """
     if not 1 <= minutes <= WATCHDOG_MAX_MINUTES:
         raise ValueError(
@@ -2067,21 +2070,42 @@ def build_watchdog_args(
         python_exe=python_exe,
         drain=True,
     )
-    return [
-        "schtasks",
-        "/Create",
-        "/TN",
-        name + WATCHDOG_TASK_SUFFIX,
-        "/SC",
-        "MINUTE",
-        "/MO",
-        str(minutes),
-        "/RL",
-        "LIMITED",
-        "/F",
-        "/TR",
-        subprocess.list2cmdline(command),
-    ]
+    executable, *arguments = command
+    boundary = start_boundary or (datetime.now() + timedelta(minutes=1)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+        "  <Triggers>\n    <TimeTrigger>\n"
+        f"      <StartBoundary>{boundary}</StartBoundary>\n"
+        "      <Repetition>\n"
+        f"        <Interval>PT{int(minutes)}M</Interval>\n"
+        "        <StopAtDurationEnd>false</StopAtDurationEnd>\n"
+        "      </Repetition>\n"
+        "      <Enabled>true</Enabled>\n"
+        "    </TimeTrigger>\n  </Triggers>\n"
+        '  <Principals>\n    <Principal id="Author">\n'
+        "      <LogonType>InteractiveToken</LogonType>\n"
+        "      <RunLevel>LeastPrivilege</RunLevel>\n"
+        "    </Principal>\n  </Principals>\n"
+        "  <Settings>\n"
+        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+        "    <StartWhenAvailable>true</StartWhenAvailable>\n"
+        "    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\n"
+        "    <AllowHardTerminate>true</AllowHardTerminate>\n"
+        "    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>\n"
+        "    <Enabled>true</Enabled>\n"
+        "  </Settings>\n"
+        '  <Actions Context="Author">\n    <Exec>\n'
+        f"      <Command>{xml_escape(executable)}</Command>\n"
+        f"      <Arguments>{xml_escape(subprocess.list2cmdline(arguments))}</Arguments>\n"
+        f"      <WorkingDirectory>{xml_escape(str(Path(__file__).resolve().parent))}</WorkingDirectory>\n"
+        "    </Exec>\n  </Actions>\n"
+        "</Task>\n"
+    )
 
 
 def build_task_xml(
@@ -2414,16 +2438,29 @@ def install(
             if line.strip().startswith(("TaskName", "Status", "Next Run Time")):
                 console.print(f"  {line.strip()}")
     if watchdog:
-        watch_args = build_watchdog_args(
-            name=name,
-            schedule_path=schedule_path,
-            output_dir=output_dir,
-            log_file=log_file,
-            python_exe=python_exe,
-            minutes=watchdog_minutes,
-        )
-        log.info("running: %s", subprocess.list2cmdline(watch_args))
-        watched = subprocess.run(watch_args, capture_output=True, text=True)
+        watch_name = name + WATCHDOG_TASK_SUFFIX
+        # From XML, not `schtasks /SC MINUTE /TR`: that switch rejects a command line longer than 261 characters and
+        # the absolute drain command is longer (measured live 2026-11-20).
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".xml", prefix="zoom-recorder-watch-", encoding="utf-16", delete=False
+        ) as handle:
+            handle.write(
+                build_watchdog_xml(
+                    schedule_path=schedule_path,
+                    output_dir=output_dir,
+                    log_file=log_file,
+                    python_exe=python_exe,
+                    minutes=watchdog_minutes,
+                )
+            )
+            watch_xml = Path(handle.name)
+        try:
+            watch_args = ["schtasks", "/Create", "/TN", watch_name, "/XML", str(watch_xml), "/F"]
+            log.info("running: %s", subprocess.list2cmdline(watch_args))
+            watched = subprocess.run(watch_args, capture_output=True, text=True)
+        finally:
+            with suppress(OSError):
+                watch_xml.unlink()
         if watched.returncode != 0:
             detail = (watched.stderr or watched.stdout).strip()
             _fail(
@@ -2432,8 +2469,7 @@ def install(
                 f"({watched.returncode}): {detail}",
             )
         console.print(
-            f"[green]installed[/] watchdog [cyan]{name + WATCHDOG_TASK_SUFFIX}[/] "
-            f"(run --drain every {watchdog_minutes} min)"
+            f"[green]installed[/] watchdog [cyan]{watch_name}[/] "
         )
 
 

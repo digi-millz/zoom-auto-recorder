@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 REMOUNT_SUFFIXES = {".mkv", ".flv", ".ts"}
 TARGET_SUFFIX = ".mp4"
+SHOTS_DIRNAME = "_shots"
 _SHORT_LIMIT = 60
 
 
@@ -360,4 +361,36 @@ def prune(
         removed.append(entry)
     if removed:
         log.info("retention: removed %d recording(s) older than %d day(s)", len(removed), days)
+    return removed
+
+
+def prune_shots(directory: Path, days: int, now: datetime | None = None) -> list[Path]:
+    """Delete ``_shots/<session>`` folders older than *days*; returns what was removed.
+
+    The dialog watcher writes one PNG per attempt plus one per unrecognised window. With the alert de-duplication the
+    count is small (37 MB over three sessions), but it is unbounded, so it follows the same ``--retention-days`` as
+    the recordings. ``days <= 0`` keeps everything.
+    """
+    if days <= 0:
+        return []
+    root = Path(directory) / SHOTS_DIRNAME
+    if not root.is_dir():
+        return []
+    cutoff = ((now or datetime.now()) - timedelta(days=days)).timestamp()
+    removed: list[Path] = []
+    try:
+        folders = [child for child in root.iterdir() if child.is_dir()]
+    except OSError:
+        return removed
+    for folder in folders:
+        try:
+            if folder.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(folder)
+        except OSError as exc:
+            log.debug("could not prune %s: %s", folder, exc)
+            continue
+        removed.append(folder)
+    if removed:
+        log.info("retention: removed %d screenshot folder(s) older than %d day(s)", len(removed), days)
     return removed

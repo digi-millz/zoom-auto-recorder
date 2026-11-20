@@ -208,6 +208,30 @@ class PruneTests(unittest.TestCase):
     def test_missing_directory_is_not_an_error(self) -> None:
         self.assertEqual(postprocess.prune(Path("Z:/definitely-not-here"), 30), [])
 
+    def test_screenshot_folders_follow_the_same_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shots = root / postprocess.SHOTS_DIRNAME
+            old, fresh = shots / "20260101-090000", shots / "20261120-180000"
+            for folder in (old, fresh):
+                folder.mkdir(parents=True)
+                (folder / "x.png").write_bytes(b"x")
+            self._age(old, 40)
+
+            removed = postprocess.prune_shots(root, 30)
+
+            self.assertEqual([p.name for p in removed], ["20260101-090000"])
+            self.assertTrue(fresh.is_dir(), "today's screenshots stay")
+            self.assertTrue(shots.is_dir(), "the container itself is not deleted")
+
+    def test_screenshot_pruning_off_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / postprocess.SHOTS_DIRNAME / "20260101-090000"
+            folder.mkdir(parents=True)
+            self.assertEqual(postprocess.prune_shots(root, 0), [])
+            self.assertTrue(folder.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

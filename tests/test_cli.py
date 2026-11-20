@@ -170,26 +170,30 @@ class SchtasksCommandTests(unittest.TestCase):
         )
         self.assertIn("--drain", args[args.index("/TR") + 1])
 
-    def test_watchdog_runs_drain_on_a_schedule_inside_max_late(self):
-        args = cli.build_watchdog_args(
-            name="ZoomRecorder",
+    def test_watchdog_runs_drain_every_five_minutes_inside_max_late(self):
+        # Registered from XML: `schtasks /SC MINUTE /TR` rejects a command over 261 characters, which is what the
+        # absolute drain command is (measured live 2026-11-20).
+        xml = cli.build_watchdog_xml(
             schedule_path="schedule.json",
             output_dir="recordings",
             python_exe="pythonw.exe",
             minutes=5,
+            start_boundary="2026-11-20T13:00:00",
         )
-
-        self.assertEqual(args[args.index("/SC") + 1], "MINUTE")
-        self.assertEqual(args[args.index("/MO") + 1], "5")
-        self.assertEqual(args[args.index("/TN") + 1], "ZoomRecorder-watch")
-        command = args[args.index("/TR") + 1]
-        self.assertIn(" run ", f" {command} ")
-        self.assertIn("--drain", command)
+        task = ET.fromstring(xml)
+        trigger = task.find("t:Triggers/t:TimeTrigger", NS)
+        self.assertIsNotNone(trigger)
+        assert trigger is not None
+        self.assertEqual(trigger.findtext("t:Repetition/t:Interval", namespaces=NS), "PT5M")
+        self.assertEqual(trigger.findtext("t:StartBoundary", namespaces=NS), "2026-11-20T13:00:00")
+        arguments = task.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) or ""
+        self.assertIn("run", arguments)
+        self.assertIn("--drain", arguments)
+        self.assertLess(len(arguments), 261, "the XML path exists precisely because /TR is capped")
 
     def test_watchdog_refuses_an_interval_it_could_not_catch(self):
         with self.assertRaises(ValueError):
-            cli.build_watchdog_args(
-                name="ZoomRecorder",
+            cli.build_watchdog_xml(
                 schedule_path="schedule.json",
                 output_dir="recordings",
                 minutes=cli.WATCHDOG_MAX_MINUTES + 1,

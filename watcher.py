@@ -252,7 +252,13 @@ class DialogWatcher:
         if target is None:
             return False
 
+        attempt = self._typed.get(window.hwnd, 0)
         x, y = capture.to_screen(*target.center)
+        if attempt:
+            # The first attempt lands about seven times in ten (two warnings in three days). Repeating the identical
+            # gesture fails the same way, so the retry aims a few pixels lower and waits longer for CEF focus.
+            y += 4
+        settle = 0.8 if attempt else 0.5
         self._shot(window, "before-email", capture.image)
         log.info("typing the prejoin email into %s at (%d, %d)", window.cls, x, y)
         # A synthetic click hits whatever is on top at that point, not this window: without raising the prompt first
@@ -262,7 +268,7 @@ class DialogWatcher:
         self.sleep(0.15)
         self.click(x, y)
         # CEF needs a moment to move focus into the field; typing 250 ms after the click landed in nothing.
-        self.sleep(0.5)
+        self.sleep(settle)
         # Empty whatever is there first: a retry used to append, leaving "me@example.comme@example.com…".
         self.clear()
         self.sleep(0.15)
