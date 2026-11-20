@@ -2,17 +2,11 @@
 
 Remaining work. Everything else — scheduling, joining, dialog handling, recording, crash resume, notifications,
 recurrence/tz, calendar sync, run history, HTML reports, disk/lock/black guards — is implemented and covered by
-`python -m unittest discover -s tests -t .` (307 tests). These items are open because they need something this
+`python -m unittest discover -s tests -t .` (341 tests). These items are open because they need something this
 machine cannot provide: a live meeting, your unlocked session, or Task Scheduler rights.
 
 ## Blocked on a live session
 
-- [ ] **Register the task** — the XML itself is now validated: Task Scheduler's own COM parser accepted it and
-      read back `RestartInterval=PT1M`, `RestartCount=3`, `ExecutionTimeLimit=PT0S`,
-      `MultipleInstances=2 (IgnoreNew)`, `LogonType=3 (InteractiveToken)`, `RunLevel=0`, and the action
-      (`pythonw.exe main.py run … --drain`, working dir = repo). What is untested is *registration*: `schtasks
-      /Create` is denied in the agent shell for any task. Run `python main.py install --restart-on-failure --watchdog`
-      from a normal terminal, then `schtasks /Query /TN ZoomRecorder /XML` (and `ZoomRecorder-watch`).
 - [ ] **P4: 5-minute recording acceptance** — record a real meeting, then `python main.py verify "<file>"
       --expected-minutes 5`: it checks one video stream (Zoom window only), audio present, and duration. The
       *picture* half still needs eyes: no desktop, no notifications; audio must be Zoom only (no system sounds,
@@ -45,6 +39,13 @@ machine cannot provide: a live meeting, your unlocked session, or Task Scheduler
       `wasapi_input_capture` source, enabled/disabled per entry, global `Mic/Aux` stays muted.
 
 ## Done since the plan
+- [x] **Both tasks registered on this machine** (2026-11-20, `setup.bat`): `schtasks /Query /XML` reads back
+      `ZoomRecorder` = logon trigger, `ExecutionTimeLimit=PT0S`, `MultipleInstancesPolicy=IgnoreNew`,
+      `RestartOnFailure` 3 × `PT1M`, `LogonType=InteractiveToken`, and `ZoomRecorder-watch` = every `PT5M`,
+      `ExecutionTimeLimit=PT1H`. The resident runner holds `schedule.json.lock`; the watchdog's 5-minute
+      "another runner holds …" lines are the expected loss, not a second recorder.
+- [x] `tzdata` pinned — a fresh `.venv` (2026-11-20) had no tz database, so `ZoneInfo("UTC")` in
+      `recurrence.normalize_spec` raised `ZoneInfoNotFoundError` and a repeating entry could never re-arm.
 
 - [x] Run history (`logs/runs.jsonl`) + `python main.py runs`
 - [x] Per-run HTML report with embedded screenshots (`logs/reports/`)

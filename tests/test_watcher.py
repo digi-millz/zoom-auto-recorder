@@ -36,6 +36,7 @@ class FakeDesktop:
         self.word_sets = word_sets
         self.reads = 0
         self.clicks: list[tuple[int, int]] = []
+        self.typed: list[str] = []
         self.windows = [window()]
         self.order: list[str] = []
 
@@ -57,17 +58,24 @@ class FakeDesktop:
     def clear(self) -> None:
         self.order.append("clear")
 
+    def type_text(self, text: str) -> None:
+        self.order.append("type")
+        self.typed.append(text)
+
     def alive(self, hwnd: int) -> bool:
         return True
 
 
 def make_watcher(desktop: FakeDesktop, rules=None, **kwargs) -> DialogWatcher:
+    # Every desktop effect is injected: DialogWatcher's defaults are the real Win32 ones, and a forgotten keyword
+    # here sends live keystrokes and clicks to whatever window happens to have focus on the developer's screen.
     return DialogWatcher(
         rules=rules or dialogs.load_rules(),
         grab=desktop.grab,
         read_words=desktop.read,
         click=desktop.click,
         clear=desktop.clear,
+        type_text=desktop.type_text,
         alive=desktop.alive,
         focus=desktop.focus,
         windows=lambda _process: desktop.windows,
@@ -241,6 +249,12 @@ class PrejoinEmailTests(unittest.TestCase):
         desktop, watcher = self._watcher([word("me@example.com", 60, 120, 1)])
         watcher.poll_once()
         self.assertIn("clear", desktop.order, "an existing value must be erased, never appended to")
+        self.assertLess(desktop.order.index("clear"), desktop.order.index("type"))
+        self.assertEqual(
+            desktop.typed,
+            ["me@example.com"],
+            "the address is typed once, through the injected keyboard; the real one hits the focused window",
+        )
 
     def test_an_address_in_the_wrong_field_is_not_accepted(self) -> None:
         # Keystrokes went into the name field: the address exists, but not on the clicked line.

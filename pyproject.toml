@@ -14,6 +14,7 @@ dependencies = [
     "rich>=13,<15",
     "psutil>=5.9,<8",
     "python-dateutil>=2.8,<3",
+    "tzdata>=2024.1",
     "pillow>=10,<12",
     "obs-websocket-py==1.0",
     "winrt-runtime",

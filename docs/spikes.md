@@ -211,3 +211,18 @@ The 18:00 entry recorded end to end (`Join` clicked at score 1.00, recording act
 The notice's button is OCR'd as **`0K`** (zero-K), not `OK` — measured on the saved screenshot, where `pick` returned
 `None` until the label list carried the misread. `dialogs.pick` now returns
 `Click(rule='recording-notice', label='0K', x=431, y=160)` for that frame, and `consent` accepts the same misread.
+
+## 2026-11-20 — a fresh venv re-arms nothing; the watcher harness typed into the desktop
+
+Two defects found while arming the 18:00 run. Both were invisible from a green suite, and neither touches the join
+path.
+
+| Symptom | Measurement | Cause / fix |
+| --- | --- | --- |
+| a repeating entry could never re-arm again | `recurrence.next_start_local("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;UNTIL=20261120T235959", "2026-11-16 18:00", after=…)` → `ZoneInfoNotFoundError: No time zone found with key UTC` | `.venv` was rebuilt 17:32 the same day: `zoneinfo.TZPATH == ()` and `tzdata` was not installed — Windows ships no tz database. `normalize_spec` needs `ZoneInfo("UTC")` to make any non-`Z` `UNTIL` UTC-correct. `tzdata>=2024.1` pinned in `requirements.txt`/`pyproject.toml`; after installing it the same call returns `2026-11-20 18:00`, and `None` once past it (series exhausted → entry marked done) |
+| `me@example.comme@example.comme@example.com…` appearing in whatever window had focus, repeatedly, while no session was running | reproduced whenever `unittest` ran; no production path writes that address (`settings.email` is the real one) | `tests/test_watcher.py::make_watcher` injected `click`, `clear`, `focus`, `grab`, `windows` and `sleep` but **not** `type_text`, so `DialogWatcher` fell back to its default `window_manager.type_text` (`keybd_event` per character) and typed the test's email into the focused window. The injected `clear` was a recorder that erased nothing, so each attempt appended — the prejoin bug's signature, on the developer's desktop. Fixed with `FakeDesktop.type_text` + `type_text=` and an assertion on `desktop.typed`; proof: the whole suite run with `type_text`/`clear_field`/`click_at` replaced by traps reports 341 tests OK and no trap fires |
+
+The 18:00 run itself was healthy up to the first six minutes (`recordings/runner.log`): `VideoPreviewWndClass` click
+verified at 18:00:03, meeting window `ConfMultiTabContentWndClass` maximised 18:00:05, `OBS confirmed the recording
+is active` 18:00:06 with scene `Zoom auto-recorder`, and `2026-11-20 18-00-05.mkv` at **32.7 MB by 18:06:51**
+(≈0.6 Mbit/s, in line with the CQP 30 numbers above). No black-frame warning, so the 10 s luma check passed.

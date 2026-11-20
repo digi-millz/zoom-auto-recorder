@@ -19,6 +19,10 @@ the road.
   and every join stalls at Zoom's "Enter your email and name" prompt while the log repeats
   `OCR failed: No module named 'winrt'`. After a fresh venv, `.venv\Scripts\python.exe -c "import ocr; print(ocr.available())"`
   must print `True`.
+- `requirements.txt` pins **`tzdata`**: Windows ships no tz database, so `zoneinfo` cannot answer even
+  `ZoneInfo("UTC")` without it — and `recurrence.normalize_spec` needs exactly that for any `UNTIL` lacking a `Z`.
+  Missing it does not fail a join; it makes every repeat stop re-arming after its first run (`ZoneInfoNotFoundError`
+  at end of session).
 - **Machine-specific facts belong in `MACHINE.md`, never in a tracked doc.** Interpreter path, GPU, monitors, DPI,
   OBS/Zoom install paths, the recording folder, the zoom email, what Task Scheduler has registered — one checkout per
   machine, so anything true of *this* box and false of another goes there (it is gitignored). Tracked docs state
@@ -70,6 +74,10 @@ the road.
 - `Zoom.exe` outlives the meeting — stop on the meeting **HWND**, never on process exit.
 - OBS: `StartRecord`/`StopRecord` must be confirmed by polling state; `StopRecord`'s `outputPath` can arrive via
   the `RecordStateChanged` event, not the response.
+- A `DialogWatcher`'s callables default to the **real** ones (`window_manager.type_text` → `keybd_event`,
+  `clear_field`, `click_at`). A harness that injects only some of them types into whatever window has focus on the
+  developer's desktop — measured 2026-11-20 as `me@example.comme@example.com…` in a live field. `tests/test_watcher.py`
+  injects every effect; the suite must stay green with `type_text`/`clear_field`/`click_at` replaced by traps.
 
 ## Layout
 
