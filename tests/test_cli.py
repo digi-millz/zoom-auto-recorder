@@ -249,6 +249,16 @@ class TaskXmlTests(unittest.TestCase):
             root.find(".//t:MultipleInstancesPolicy", NS).text, "IgnoreNew"
         )
 
+    def test_the_logon_trigger_names_this_account(self):
+        # A LogonTrigger without UserId fires "at logon of any user", and registering that needs elevation; the
+        # install is per-user, so the account that runs it must be named. Registering on 2026-11-20 read back
+        # <UserId>COMMAND_CENTER\myerm</UserId>.
+        root = self.build()
+        user = root.find(".//t:LogonTrigger/t:UserId", NS)
+        assert user is not None, "a per-user logon trigger needs a UserId"
+        self.assertEqual(user.text, cli.current_account())
+        self.assertTrue(user.text, "an empty USERNAME would silently fall back to any-user")
+
     def test_the_action_runs_the_resident_runner(self):
         root = self.build()
         action = root.find(".//t:Exec", NS)

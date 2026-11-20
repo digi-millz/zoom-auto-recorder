@@ -2161,6 +2161,16 @@ def build_watchdog_xml(
         "</Task>\n"
     )
 
+def current_account() -> str:
+    """The ``DOMAIN\\user`` a logon trigger must name.
+
+    A trigger with no ``UserId`` means "at logon of any user", and registering that needs elevation. ``install``
+    is documented as per-user, so the task names the account that runs it instead.
+    """
+    user = os.environ.get("USERNAME") or ""
+    domain = os.environ.get("USERDOMAIN") or ""
+    return f"{domain}\\{user}" if domain and user else user
+
 
 def build_task_xml(
     *,
@@ -2192,6 +2202,7 @@ def build_task_xml(
         '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
         "  <Triggers>\n"
         "    <LogonTrigger>\n"
+        f"      <UserId>{xml_escape(current_account())}</UserId>\n"
         "      <Enabled>true</Enabled>\n"
         "    </LogonTrigger>\n"
         "  </Triggers>\n"
