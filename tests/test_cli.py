@@ -200,6 +200,15 @@ class SchtasksCommandTests(unittest.TestCase):
             )
 
 
+class ShortcutTests(unittest.TestCase):
+    def test_shortcuts_go_where_windows_expects_them(self) -> None:
+        start = cli.shortcut_dir("start")
+        desktop = cli.shortcut_dir("desktop")
+        self.assertEqual(start.parts[-2:], ("Start Menu", "Programs"))
+        self.assertEqual(desktop.name, "Desktop")
+        self.assertNotEqual(start, desktop)
+
+
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 
 

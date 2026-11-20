@@ -7,18 +7,50 @@ name = "zoom-auto-recorder"
 version = "0.2.0"
 description = "Schedule Zoom meetings and record them with OBS Studio until the meeting closes."
 requires-python = ">=3.10"
+# Mirrors requirements.txt: recurrence imports dateutil, the watcher needs Pillow, and the OCR ladder is not
+# optional (without it no dialog label is ever read). An install missing any of these is broken, not degraded.
 dependencies = [
     "click>=8.1,<9",
     "rich>=13,<15",
     "psutil>=5.9,<8",
+    "python-dateutil>=2.8,<3",
+    "pillow>=10,<12",
     "obs-websocket-py==1.0",
+    "winrt-runtime",
+    "winrt-Windows.Media.Ocr",
+    "winrt-Windows.Graphics.Imaging",
+    "winrt-Windows.Storage",
+    "winrt-Windows.Globalization",
+    "winrt-Windows.Foundation",
 ]
 
 [project.scripts]
 zoom-recorder = "cli:cli"
 
 [tool.setuptools]
-py-modules = ["cli", "scheduler", "window_manager", "obs_controller", "store", "webui", "ics"]
+py-modules = [
+    "cli",
+    "defaults",
+    "dialogs",
+    "ics",
+    "invite",
+    "notify",
+    "obs_controller",
+    "ocr",
+    "postprocess",
+    "recurrence",
+    "report",
+    "scene",
+    "scheduler",
+    "store",
+    "teach",
+    "watcher",
+    "webui",
+    "win_capture",
+    "window_manager",
+    "zoom_account",
+]
 
-# ui.html is resolved next to webui.py; run from a source checkout (or copy it
-# beside the installed module) when using `zoom-recorder gui`.
+# ui.html and rules.json are resolved next to webui.py/dialogs.py, so an installed copy needs them beside the modules.
+[tool.setuptools.data-files]
+"." = ["ui.html", "rules.json"]

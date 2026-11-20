@@ -196,6 +196,36 @@ non-local `Origin`/`Host`, or a non-JSON POST — a desktop control panel, not a
 can own the port; a second launch exits with a message telling you to reuse the running one. An open tab from a
 previous launch reloads itself once when it sees a 401, because its baked-in token no longer matches.
 
+## One-time setup on a machine
+
+```powershell
+.\setup.bat     # venv + requirements + logon task + watchdog, then prints status
+.\doctor.bat    # read-only health report: runner, OBS, OCR, tasks, last runs, newest files
+```
+
+`setup.bat` is idempotent — run it again after a `git pull` or when a machine is rebuilt; it stops any stray runner
+before registering, so it never leaves two of them. It refuses with a clear message when Python 3.13 or Task
+Scheduler is unavailable, and it must run from **your** terminal (per-user tasks; a service or an
+agent shell is denied `schtasks /Create`).
+
+`doctor.bat` answers "is it working?" in one screen: `status` (pid, counts, next event, OBS socket), the OBS version
+and record folder, whether Windows OCR is available, both task states, the last three runs with exit codes and
+paths, and the three newest recordings with sizes.
+
+The scripts are convenience wrappers, not the mechanism: the durable parts are the two Task Scheduler entries
+(logon runner with restart-on-failure, plus a 5-minute `run --drain` watchdog) and the checkout itself. A shortcut is
+only the thing you click:
+
+```powershell
+python main.py install --restart-on-failure --watchdog --shortcuts   # adds "Zoom Recorder" to the Desktop and Start menu
+```
+
+`--shortcuts` writes a `.lnk` pointing at `pythonw.exe main.py gui` (the UI), so the icon never opens a console.
+For a command on `PATH` instead, `pipx install .` works — `pyproject.toml` declares the `zoom-recorder` entry point
+and mirrors `requirements.txt`; a plain `pip install .` is the same thing without isolation. Neither replaces the
+scheduled task: a service cannot drive Zoom's windows (session 0 has no desktop), so "always running" means
+"Task Scheduler at logon", which is what `install` registers.
+
 ## Start at logon
 
 ```powershell

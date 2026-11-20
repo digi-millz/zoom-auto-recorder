@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -2042,6 +2043,49 @@ WATCHDOG_TASK_SUFFIX = "-watch"
 WATCHDOG_MAX_MINUTES = 10
 
 
+def shortcut_dir(kind: str = "start") -> Path:
+    """Where Windows keeps shortcuts a user can click (``desktop`` / ``start``)."""
+    if kind == "desktop":
+        return Path(os.environ.get("USERPROFILE") or Path.home()) / "Desktop"
+    return (
+        Path(os.environ.get("APPDATA") or Path.home())
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+    )
+
+
+def create_shortcut(link: Path, target: Path, arguments: str, workdir: Path) -> bool:
+    """Create a ``.lnk`` through WScript.Shell; a failure is logged, never raised."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    script = (
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
+        "$s.TargetPath='{target}';"
+        "$s.Arguments='{args}';"
+        "$s.WorkingDirectory='{wd}';"
+        "$s.Save()"
+    ).format(
+        link=str(link).replace("'", "''"),
+        target=str(target).replace("'", "''"),
+        args=arguments.replace("'", "''"),
+        wd=str(workdir).replace("'", "''"),
+    )
+    try:
+        done = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True
+        )
+    except OSError as exc:
+        log.warning("could not create %s: %s", link.name, exc)
+        return False
+    if done.returncode != 0:
+        log.warning(
+            "could not create %s: %s", link.name, (done.stderr or done.stdout).strip()[:200]
+        )
+        return False
+    return True
+
+
 def build_watchdog_xml(
     *,
     schedule_path: str | Path,
@@ -2364,6 +2408,12 @@ def runs(schedule_path: str, limit: int, as_json: bool) -> None:
     type=click.IntRange(1, WATCHDOG_MAX_MINUTES),
     help="How often the watchdog task fires (must stay inside --max-late).",
 )
+@click.option(
+    "--shortcuts/--no-shortcuts",
+    "shortcuts",
+    default=False,
+    help="Also put a 'Zoom Recorder' shortcut on the Desktop and in the Start menu.",
+)
 def install(
     name: str,
     schedule_path: str,
@@ -2374,6 +2424,7 @@ def install(
     drain: bool,
     watchdog: bool,
     watchdog_minutes: int,
+    shortcuts: bool,
 ) -> None:
     """Register the resident runner to start at logon (Windows Task Scheduler)."""
     if not is_windows():
@@ -2471,6 +2522,20 @@ def install(
         console.print(
             f"[green]installed[/] watchdog [cyan]{watch_name}[/] "
         )
+
+    if shortcuts:
+        script = Path(__file__).resolve().with_name("main.py")
+        made = 0
+        for kind in ("start", "desktop"):
+            link = shortcut_dir(kind) / "Zoom Recorder.lnk"
+            if create_shortcut(link, Path(_pythonw()), f'"{script}" gui', script.parent):
+                made += 1
+                console.print(f"[green]shortcut[/] {link}")
+        if not made:
+            console.print(
+                "[yellow]no shortcut created[/] — create one by hand pointing at "
+                f"{_pythonw()} \"{script}\" gui"
+            )
 
 
 @cli.command("uninstall")
