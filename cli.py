@@ -2056,20 +2056,30 @@ def shortcut_dir(kind: str = "start") -> Path:
     )
 
 
-def create_shortcut(link: Path, target: Path, arguments: str, workdir: Path) -> bool:
+def app_icon() -> Path | None:
+    """The icon that ships with the checkout, if it is there (``tools/make_icon.py`` regenerates it)."""
+    icon = Path(__file__).resolve().parent / "assets" / "zoom-recorder.ico"
+    return icon if icon.is_file() else None
+
+
+def create_shortcut(
+    link: Path, target: Path, arguments: str, workdir: Path, icon: Path | None = None
+) -> bool:
     """Create a ``.lnk`` through WScript.Shell; a failure is logged, never raised."""
     link.parent.mkdir(parents=True, exist_ok=True)
+    icon_line = f"$s.IconLocation='{str(icon).replace(chr(39), chr(39) * 2)},0';" if icon else ""
     script = (
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
         "$s.TargetPath='{target}';"
         "$s.Arguments='{args}';"
         "$s.WorkingDirectory='{wd}';"
-        "$s.Save()"
+        "{icon}$s.Save()"
     ).format(
         link=str(link).replace("'", "''"),
         target=str(target).replace("'", "''"),
         args=arguments.replace("'", "''"),
         wd=str(workdir).replace("'", "''"),
+        icon=icon_line,
     )
     try:
         done = subprocess.run(
@@ -2525,10 +2535,11 @@ def install(
 
     if shortcuts:
         script = Path(__file__).resolve().with_name("main.py")
+        icon = app_icon()
         made = 0
         for kind in ("start", "desktop"):
             link = shortcut_dir(kind) / "Zoom Recorder.lnk"
-            if create_shortcut(link, Path(_pythonw()), f'"{script}" gui', script.parent):
+            if create_shortcut(link, Path(_pythonw()), f'"{script}" gui', script.parent, icon):
                 made += 1
                 console.print(f"[green]shortcut[/] {link}")
         if not made:

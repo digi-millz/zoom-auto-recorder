@@ -98,6 +98,8 @@ the road.
 | `rules.json` | dialog labels and limits (data, not code) |
 | `setup.bat` | one-shot per machine: venv, requirements, logon task + watchdog (idempotent, needs the user's terminal) |
 | `doctor.bat` | read-only health screen: runner, OBS, OCR, tasks, last runs, newest files |
+| `assets/` | `zoom-recorder.ico` (+ `.png` preview) — the shortcut icon, drawn by `tools/make_icon.py` |
+| `tools/make_icon.py` | regenerates the icon per size; never hand-edit the `.ico` |
 | `docs/` | `spikes.md` (live-meeting evidence), `live-acceptance.md` (the checks that need a meeting) |
 | `MACHINE.md` | this checkout's facts — interpreter path, GPU, monitors, install paths, recording folder (gitignored) |
 | `tests/` | unittest (no Zoom/OBS required) |

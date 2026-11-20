@@ -208,6 +208,18 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual(desktop.name, "Desktop")
         self.assertNotEqual(start, desktop)
 
+    def test_the_shipped_icon_carries_several_sizes(self) -> None:
+        from PIL import Image
+
+        icon = cli.app_icon()
+        self.assertIsNotNone(icon)
+        assert icon is not None
+        self.assertEqual(icon.suffix, ".ico")
+        with Image.open(icon) as image:
+            sizes = image.ico.sizes()
+        self.assertIn((16, 16), sizes, "Windows lists 16 px first; it must exist or Explorer blurs the icon")
+        self.assertIn((256, 256), sizes)
+
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 

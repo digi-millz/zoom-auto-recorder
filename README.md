@@ -220,7 +220,11 @@ only the thing you click:
 python main.py install --restart-on-failure --watchdog --shortcuts   # adds "Zoom Recorder" to the Desktop and Start menu
 ```
 
-`--shortcuts` writes a `.lnk` pointing at `pythonw.exe main.py gui` (the UI), so the icon never opens a console.
+`--shortcuts` writes a `.lnk` pointing at `pythonw.exe main.py gui` (the UI), with `assets/zoom-recorder.ico` as its
+icon, so double-clicking opens the calendar and never a console. The mark is a recording dot inside a lens ring on an
+indigo plate: drawn per size (thicker ring below 32 px, no brackets below 48 px) by `tools/make_icon.py`, which also
+writes a size strip to `%TEMP%` for eyeballing 16/24/32/48/64 px. Delete `assets/zoom-recorder.ico` and the shortcut
+falls back to the interpreter's own icon.
 For a command on `PATH` instead, `pipx install .` works — `pyproject.toml` declares the `zoom-recorder` entry point
 and mirrors `requirements.txt`; a plain `pip install .` is the same thing without isolation. Neither replaces the
 scheduled task: a service cannot drive Zoom's windows (session 0 has no desktop), so "always running" means
